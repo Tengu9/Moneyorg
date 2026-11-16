@@ -1,4 +1,4 @@
-/* ui.js — интерфейс приложения */
+﻿/* ui.js — интерфейс приложения */
 
 const App = {
   data: null,
@@ -9,6 +9,7 @@ const App = {
 };
 
 const STORE_KEY = 'cash.data.v1';
+const APP_VERSION = '0.3';
 
 /* ---------- хранилище ---------- */
 function loadData() {
@@ -295,7 +296,7 @@ function viewSettings() {
     <div class="card">
       <h2>О приложении</h2>
       <div class="sub">Cash — свой учёт финансов с прогнозом денежного потока. Данные хранятся только на устройстве, пока ты сам не отправишь их в облако.</div>
-      <div class="hint">Версия 0.1 · ${esc(navigator.userAgent.includes('Android') ? 'Android' : 'ПК')}</div>
+      <div class="hint">Версия ${APP_VERSION} · ${esc(navigator.userAgent.includes('Android') ? 'Android' : 'ПК')}</div>
     </div>`;
 }
 
@@ -591,3 +592,7 @@ function init() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+
+
+

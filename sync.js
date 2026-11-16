@@ -1,4 +1,4 @@
-/* sync.js — Яндекс.Диск (REST API), Telegram-бот (бэкап) */
+﻿/* sync.js — Яндекс.Диск (REST API), Telegram-бот (бэкап) */
 
 /* Яндекс ID: OAuth2 implicit flow, токен приходит в #access_token */
 const YA = {
@@ -44,6 +44,21 @@ const YA = {
   }
 };
 
+function httpErr(prefix, r) {
+  const e = new Error(prefix + ': HTTP ' + r.status);
+  e.status = r.status;
+  return e;
+}
+
+function ydHumanError(e) {
+  if (e.status === 401) return 'Яндекс не принял токен — он истёк или отозван. Войди заново.';
+  if (e.status === 403) return 'У приложения нет прав на Яндекс.Диск — включи доступ в oauth.yandex.ru и войди заново.';
+  if (e.status === 404) return 'Файла на Диске ещё нет.';
+  if (e.status === 507) return 'Закончилось место на Яндекс.Диске.';
+  if (e.status === 429) return 'Слишком много запросов к Диску — подожди минуту.';
+  return e.message;
+}
+
 const YD = {
   api: 'https://cloud-api.yandex.net/v1/disk',
   folder: 'app:/Cash',
@@ -60,25 +75,25 @@ async function ydReq(url, token, opts) {
 async function ydEnsureFolder(token) {
   const r = await ydReq(YD.api + '/resources?path=' + encodeURIComponent(YD.folder), token, { method: 'PUT' });
   // 201 создано, 409 уже есть — оба варианта нормальны
-  if (!r.ok && r.status !== 409) throw new Error('папка: HTTP ' + r.status);
+  if (!r.ok && r.status !== 409) throw httpErr('папка', r);
 }
 
 async function ydDownload(token) {
   const meta = await ydReq(YD.api + '/resources/download?path=' + encodeURIComponent(YD.file), token);
   if (meta.status === 404) return null;
-  if (!meta.ok) throw new Error('файл: HTTP ' + meta.status);
+  if (!meta.ok) throw httpErr('файл', meta);
   const { href } = await meta.json();
   const file = await fetch(href);
-  if (!file.ok) throw new Error('скачивание: HTTP ' + file.status);
+  if (!file.ok) throw httpErr('скачивание', file);
   return await file.text();
 }
 
 async function ydUpload(token, text) {
   const up = await ydReq(YD.api + '/resources/upload?path=' + encodeURIComponent(YD.file) + '&overwrite=true', token);
-  if (!up.ok) throw new Error('upload-url: HTTP ' + up.status);
+  if (!up.ok) throw httpErr('upload-url', up);
   const { href } = await up.json();
   const put = await fetch(href, { method: 'PUT', body: text, headers: { 'Content-Type': 'application/json' } });
-  if (!put.ok) throw new Error('загрузка: HTTP ' + put.status);
+  if (!put.ok) throw httpErr('загрузка', put);
 }
 
 /* слияние: побеждает запись с более свежим updatedAt */
@@ -137,8 +152,14 @@ async function yandexSync() {
     setSyncStatus('Готово: ' + new Date().toLocaleTimeString('ru-RU'));
     toast('Синхронизировано с Яндекс.Диском');
   } catch (e) {
-    setSyncStatus('Ошибка: ' + e.message);
-    toast('Не удалось: ' + e.message);
+    if (e.status === 401 || e.status === 403) {
+      App.data.settings.yd = Object.assign({}, App.data.settings.yd || {}, { token: '', expired: true });
+      saveData();
+      render();
+    }
+    const msg = ydHumanError(e);
+    setSyncStatus(msg);
+    toast(msg);
   }
 }
 
@@ -160,3 +181,5 @@ async function telegramSend() {
     toast('Telegram недоступен: ' + e.message);
   }
 }
+
+
