@@ -1,4 +1,48 @@
-/* sync.js — Яндекс.Диск (REST API) и Telegram-бот (бэкап) */
+/* sync.js — Яндекс.Диск (REST API), Telegram-бот (бэкап) */
+
+/* Яндекс ID: OAuth2 implicit flow, токен приходит в #access_token */
+const YA = {
+  clientId: 'cc4ea298b42243e591f0fc5179beaaf1',
+  redirect: 'https://moneyorg.tengu9.ru',
+  authUrl() {
+    const params = new URLSearchParams({
+      response_type: 'token',
+      client_id: YA.clientId,
+      redirect_uri: YA.redirect
+    });
+    return 'https://oauth.yandex.ru/authorize?' + params.toString();
+  },
+  login() {
+    if (location.protocol === 'file:') { toast('Вход работает только на сайте https://moneyorg.tengu9.ru'); return; }
+    location.href = YA.authUrl();
+  },
+  /** возвращает true, если в адресе был токен и он сохранён */
+  consumeToken() {
+    if (!location.hash || location.hash.indexOf('access_token=') < 0) return false;
+    const p = new URLSearchParams(location.hash.slice(1));
+    const token = p.get('access_token');
+    if (!token) return false;
+    App.data.settings.yd = Object.assign({}, App.data.settings.yd || {}, { token, since: Date.now() });
+    saveData();
+    history.replaceState(null, '', location.pathname + location.search);
+    YA.whoami(token).then(login => {
+      if (login) {
+        App.data.settings.yd.login = login;
+        saveData();
+        if (App.tab === 'settings') render();
+      }
+    }).catch(() => {});
+    return true;
+  },
+  async whoami(token) {
+    try {
+      const r = await fetch('https://login.yandex.ru/info?format=json', { headers: { Authorization: 'OAuth ' + token } });
+      if (!r.ok) return null;
+      const j = await r.json();
+      return j.default_email || j.login || '';
+    } catch (e) { return null; }
+  }
+};
 
 const YD = {
   api: 'https://cloud-api.yandex.net/v1/disk',

@@ -268,11 +268,21 @@ function viewSettings() {
 
     <div class="card">
       <h2>Яндекс.Диск</h2>
-      <div class="field"><label>OAuth-токен</label><input id="ydToken" type="password" placeholder="вставь токен" value="${esc((s.yd || {}).token || '')}"></div>
-      <div class="fab-row" style="margin:0">
-        <button class="btn" data-act="yd-sync" style="flex:1">Синхронизировать</button>
-      </div>
-      <div class="hint" id="ydStatus">${esc(App.syncStatus || 'Файл хранится в app:/Cash/cash-data.json')}</div>
+      ${(s.yd || {}).token ? `
+        <div class="row">
+          <div class="ico inc">${ICON_SVG.inc}</div>
+          <div class="grow"><div class="title">Подключён${(s.yd || {}).login ? ' · ' + esc(s.yd.login) : ''}</div>
+            <div class="sub">База синхронизируется в app:/Cash/cash-data.json</div></div>
+        </div>
+        <div class="fab-row" style="margin:12px 0 0">
+          <button class="btn" data-act="yd-sync" style="flex:1">Синхронизировать</button>
+          <button class="btn danger" data-act="yd-logout">Отключить</button>
+        </div>`
+      : `
+        <div class="sub">Войди через Яндекс ID — приложение получит доступ только к своей папке на Диске.</div>
+        <div class="fab-row" style="margin:12px 0 0"><button class="btn block" data-act="yd-login">Войти через Яндекс</button></div>
+        <div class="hint"><a href="#" data-act="yd-manual" style="color:inherit">или вставить токен вручную</a></div>`}
+      <div class="hint" id="ydStatus">${esc(App.syncStatus || '')}</div>
     </div>
 
     <div class="card">
@@ -310,6 +320,13 @@ function act(name) {
   else if (name === 'export') exportJSON();
   else if (name === 'import') $('#importFile').click();
   else if (name === 'yd-sync') yandexSync();
+  else if (name === 'yd-login') YA.login();
+  else if (name === 'yd-logout') {
+    if (!confirm('Отключить Яндекс.Диск? Файл на Диске останется.')) return;
+    App.data.settings.yd = {};
+    saveData(); render(); toast('Отключено');
+  }
+  else if (name === 'yd-manual') manualYandexToken();
   else if (name === 'tg-send') telegramSend();
 }
 function shiftMonth(m, n) {
@@ -509,6 +526,22 @@ function editPlan(id) {
 }
 
 /* ---------- бэкап JSON ---------- */
+function manualYandexToken() {
+  openSheet(`
+    <h3>Токен Яндекс.Диска</h3>
+    <div class="field"><label>OAuth-токен</label><input id="ydTok" type="password" placeholder="y0_Ag…"></div>
+    <div class="hint">Токен можно получить на oauth.yandex.ru. Хранится только на этом устройстве.</div>
+    <div class="actions"><button class="btn" id="fSave">Сохранить</button></div>
+  `, sheet => {
+    $('#fSave', sheet).onclick = () => {
+      const t = $('#ydTok', sheet).value.trim();
+      if (!t) { toast('Поле пустое'); return; }
+      App.data.settings.yd = { token: t };
+      saveData(); closeSheet(); render(); toast('Токен сохранён');
+    };
+  });
+}
+
 function exportJSON() {
   const blob = new Blob([JSON.stringify(App.data, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -538,6 +571,10 @@ function importJSONFile(file) {
 /* ---------- запуск ---------- */
 function init() {
   loadData();
+  if (YA.consumeToken()) {
+    toast('Яндекс.Диск подключён');
+    App.tab = 'settings';
+  }
   const h = location.hash.replace('#', '');
   if (['accounts', 'transactions', 'plans', 'forecast', 'settings'].indexOf(h) >= 0) App.tab = h;
   render();
