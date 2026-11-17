@@ -97,6 +97,17 @@ function totalBalance(data, uptoDate) {
   return data.accounts.filter(a => !a.closed).reduce((s, a) => s + accountBalance(data, a.id, uptoDate), 0);
 }
 
+/* ---------- разбивка операции по категориям ---------- */
+/* t.splits = [{categoryId, amount}], суммы в копейках, сумма частей = t.amount.
+   Если разбивки нет — категория берётся из t.categoryId. */
+function txSplits(t) {
+  return (t && Array.isArray(t.splits) && t.splits.length > 1) ? t.splits : null;
+}
+function txCategoryId(t) {
+  const s = txSplits(t);
+  return s ? s[0].categoryId : (t ? t.categoryId : null);
+}
+
 /**
  * Разворачивает план в даты в диапазоне [from, to].
  * plan.repeat = {freq: 'day'|'week'|'month', interval: n} или null (разовый).
@@ -163,5 +174,5 @@ function forecast(data, months, todayOverride) {
 
 /* экспорт для Node-тестов */
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { Money, D, DEFAULT_CATEGORIES, emptyData, uid, accountBalance, totalBalance, planOccurrences, forecast };
+  module.exports = { Money, D, DEFAULT_CATEGORIES, emptyData, uid, accountBalance, totalBalance, txSplits, txCategoryId, planOccurrences, forecast };
 }

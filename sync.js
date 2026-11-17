@@ -62,7 +62,8 @@ function ydHumanError(e) {
 const YD = {
   api: 'https://cloud-api.yandex.net/v1/disk',
   folder: 'app:/Cash',
-  file: 'app:/Cash/cash-data.json'
+  file: 'app:/Cash/cash-data.json',
+  photos: 'app:/Cash/photos'
 };
 
 async function ydReq(url, token, opts) {
@@ -94,6 +95,46 @@ async function ydUpload(token, text) {
   const { href } = await up.json();
   const put = await fetch(href, { method: 'PUT', body: text, headers: { 'Content-Type': 'application/json' } });
   if (!put.ok) throw httpErr('загрузка', put);
+}
+
+/* ---------- фото чеков на Диске ---------- */
+async function ydPhotoUpload(token, name, blob) {
+  const up = await ydReq(YD.api + '/resources/upload?path=' + encodeURIComponent(YD.photos + '/' + name) + '&overwrite=true', token);
+  if (!up.ok) throw httpErr('upload-url фото', up);
+  const { href } = await up.json();
+  const put = await fetch(href, { method: 'PUT', body: blob, headers: { 'Content-Type': 'image/jpeg' } });
+  if (!put.ok) throw httpErr('загрузка фото', put);
+}
+
+async function ydPhotoHref(token, name) {
+  const r = await ydReq(YD.api + '/resources/download?path=' + encodeURIComponent(YD.photos + '/' + name), token);
+  if (!r.ok) throw httpErr('фото', r);
+  return (await r.json()).href;
+}
+
+async function ydPhotoDelete(token, name) {
+  try {
+    const r = await ydReq(YD.api + '/resources?path=' + encodeURIComponent(YD.photos + '/' + name), token, { method: 'DELETE' });
+    return r.ok || r.status === 404;
+  } catch (e) { return false; }
+}
+
+/* догружает на Диск фото, снятые без сети */
+async function flushPendingPhotos(token) {
+  if (typeof PhotoStore === 'undefined') return 0;
+  const list = (App.data.transactions || []).filter(t => t.photo && t.photoPending && !t.deleted);
+  let done = 0;
+  for (const t of list) {
+    try {
+      const blob = await PhotoStore.get(t.photo);
+      if (!blob) continue;
+      await ydPhotoUpload(token, t.photo, blob);
+      t.photoPending = false;
+      done++;
+    } catch (e) { /* попробуем при следующей синхронизации */ }
+  }
+  if (done) saveData();
+  return done;
 }
 
 /* слияние: побеждает запись с более свежим updatedAt */
@@ -137,6 +178,7 @@ async function yandexSync() {
   setSyncStatus('Синхронизация…');
   try {
     await ydEnsureFolder(token);
+    await flushPendingPhotos(token);
     const remoteText = await ydDownload(token);
     let merged = App.data;
     if (remoteText) {

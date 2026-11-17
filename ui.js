@@ -28,6 +28,86 @@ function saveData() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(App.data)); } catch (e) { toast('Не удалось сохранить: ' + e.message); }
 }
 
+/* ---------- фото чеков: локальный кэш в IndexedDB ---------- */
+const PhotoStore = {
+  _db: null,
+  open() {
+    return new Promise((res, rej) => {
+      if (this._db) return res(this._db);
+      const rq = indexedDB.open('cash.photos', 1);
+      rq.onupgradeneeded = () => { if (!rq.result.objectStoreNames.contains('blobs')) rq.result.createObjectStore('blobs'); };
+      rq.onsuccess = () => { this._db = rq.result; res(this._db); };
+      rq.onerror = () => rej(rq.error);
+    });
+  },
+  async _run(mode, fn) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const t = db.transaction('blobs', mode);
+      const rq = fn(t.objectStore('blobs'));
+      t.oncomplete = () => res(rq && rq.result);
+      t.onerror = () => rej(t.error);
+      t.onabort = () => rej(t.error);
+    });
+  },
+  put(name, blob) { return this._run('readwrite', s => s.put(blob, name)); },
+  get(name) { return this._run('readonly', s => s.get(name)); },
+  del(name) { return this._run('readwrite', s => s.delete(name)); }
+};
+
+/* сжимает фото до читаемого размера: длинная сторона ≤ maxSide, JPEG */
+function shrinkImage(file, maxSide, quality) {
+  maxSide = maxSide || 1600;
+  quality = quality || 0.82;
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const k = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+        const w = Math.max(1, Math.round(img.naturalWidth * k));
+        const h = Math.max(1, Math.round(img.naturalHeight * k));
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        cv.getContext('2d').drawImage(img, 0, 0, w, h);
+        cv.toBlob(b => {
+          URL.revokeObjectURL(url);
+          b ? res(b) : rej(new Error('не удалось сжать'));
+        }, 'image/jpeg', quality);
+      } catch (e) { URL.revokeObjectURL(url); rej(e); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('это не картинка')); };
+    img.src = url;
+  });
+}
+
+/* ссылка на фото: сначала локальный кэш, потом Диск (и кэшируем) */
+async function photoSrc(name) {
+  const blob = await PhotoStore.get(name).catch(() => null);
+  if (blob) return URL.createObjectURL(blob);
+  const token = ((App.data.settings.yd || {}).token || '').trim();
+  if (!token) return null;
+  try {
+    const href = await ydPhotoHref(token, name);
+    fetch(href).then(r => r.blob()).then(b => PhotoStore.put(name, b)).catch(() => {});
+    return href;
+  } catch (e) { return null; }
+}
+
+function openPhotoViewer(src) {
+  let v = document.getElementById('photoViewer');
+  if (!v) {
+    v = document.createElement('div');
+    v.id = 'photoViewer';
+    v.className = 'viewer hidden';
+    v.innerHTML = '<img alt="чек"><button class="btn" id="vClose">Закрыть</button>';
+    document.body.appendChild(v);
+    v.onclick = e => { if (e.target === v || e.target.id === 'vClose') v.classList.add('hidden'); };
+  }
+  v.querySelector('img').src = src;
+  v.classList.remove('hidden');
+}
+
 /* ---------- утилиты ---------- */
 function $(sel, root) { return (root || document).querySelector(sel); }
 function $$(sel, root) { return Array.from((root || document).querySelectorAll(sel)); }
@@ -130,12 +210,17 @@ function viewTransactions() {
     const items = byDate[d].map(t => {
       const isInc = t.amount > 0;
       const isTr = !!t.transferAccountId;
+      const sp = isTr ? null : txSplits(t);
       const icon = isTr ? ICON_SVG.transfer : isInc ? ICON_SVG.inc : ICON_SVG.exp;
       const cls = isTr ? '' : isInc ? 'inc' : 'exp';
-      const sub = isTr ? '→ ' + accName(t.transferAccountId) : catName(t.categoryId) + (t.payee ? ' · ' + t.payee : '');
+      const primary = sp ? catName(sp[0].categoryId) : catName(t.categoryId);
+      const titleCat = sp ? primary + ' +' + (sp.length - 1) : primary;
+      const sub = (isTr ? '→ ' + accName(t.transferAccountId)
+        : (sp ? sp.map(x => catName(x.categoryId)).join(' + ') : primary) + (t.payee ? ' · ' + t.payee : ''))
+        + (t.photo ? ' · фото' : '');
       return `<div class="row" data-edit-tx="${t.id}">
         <div class="ico ${cls}">${icon}</div>
-        <div class="grow"><div class="title">${esc(isTr ? 'Перевод' : (t.payee || catName(t.categoryId)))}</div>
+        <div class="grow"><div class="title">${esc(isTr ? 'Перевод' : (t.payee || titleCat))}</div>
           <div class="sub">${esc(sub)}</div></div>
         <div class="amount ${t.amount < 0 ? 'neg' : 'pos'}">${Money.fmt(t.amount, true)}</div>
       </div>`;
@@ -383,6 +468,7 @@ function editTransaction(id, kind) {
   const isTr = t ? !!t.transferAccountId : kind === 'tr';
   const isInc = t ? t.amount > 0 : kind === 'inc';
   const amountVal = t ? Math.abs(t.amount / 100).toFixed(2) : '';
+  const oldSplits = t ? txSplits(t) : null;
 
   const accOpts = sel => accs.map(a => `<option value="${a.id}" ${sel === a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('');
   const cats = App.data.categories.filter(c => c.type === (isInc ? 'income' : 'expense'));
@@ -399,29 +485,158 @@ function editTransaction(id, kind) {
     <div class="field"><label>Дата</label><input id="fDate" type="date" value="${t ? t.date : D.today()}"></div>
     <div class="field" id="accWrap"><label>${isTr ? 'Со счёта' : 'Счёт'}</label><select id="fAcc">${accOpts(t ? t.accountId : accs[0].id)}</select></div>
     <div class="field" id="acc2Wrap" style="${isTr ? '' : 'display:none'}"><label>На счёт</label><select id="fAcc2">${accOpts(t && t.transferAccountId ? t.transferAccountId : (accs[1] || accs[0]).id)}</select></div>
-    <div class="field" id="catWrap" style="${isTr ? 'display:none' : ''}"><label>Категория</label><select id="fCat">${catOpts(t ? t.categoryId : cats[0].id)}</select></div>
+    <div class="field" id="catWrap" style="${isTr || oldSplits ? 'display:none' : ''}"><label>Категория</label><select id="fCat">${catOpts(t ? txCategoryId(t) : cats[0].id)}</select></div>
+    <div class="field" id="splitWrap" style="${oldSplits && !isTr ? '' : 'display:none'}">
+      <label>Разбивка по категориям</label>
+      <div id="splitRows"></div>
+      <div class="two" style="margin-top:8px">
+        <button class="btn soft sm" id="fSplitAdd" type="button">+ категория</button>
+        <button class="btn ghost sm" id="fSplitOff" type="button">убрать разбивку</button>
+      </div>
+      <div class="hint" id="splitInfo"></div>
+    </div>
+    <div class="field" id="splitOnWrap" style="${isTr || oldSplits ? 'display:none' : ''}">
+      <button class="btn ghost sm block" id="fSplitOn" type="button">Разделить по категориям</button>
+    </div>
     <div class="field"><label>Контрагент / название</label><input id="fPayee" value="${esc(t ? (t.payee || '') : '')}" placeholder="Пятёрочка, зарплата…"></div>
     <div class="field"><label>Заметка</label><input id="fNote" value="${esc(t ? (t.note || '') : '')}"></div>
+    <div class="field" id="photoField" style="${isTr ? 'display:none' : ''}">
+      <label>Фото чека</label>
+      <div id="photoBox"></div>
+      <input type="file" id="photoFile" accept="image/*" style="display:none">
+      <div class="two" style="margin-top:8px">
+        <button class="btn soft sm" id="photoAdd" type="button">Добавить фото</button>
+        <button class="btn ghost sm" id="photoDel" type="button">Убрать фото</button>
+      </div>
+      <div class="hint" id="photoHint"></div>
+    </div>
     <div class="actions">
       <button class="btn" id="fSave">Сохранить</button>
       ${t ? '<button class="btn danger" id="fDel">Удалить</button>' : ''}
     </div>
   `, sheet => {
-    const state = { kind: isTr ? 'tr' : isInc ? 'inc' : 'exp' };
-    const refreshCats = k => {
-      const list = App.data.categories.filter(c => c.type === (k === 'inc' ? 'income' : 'expense'));
+    const state = { kind: isTr ? 'tr' : isInc ? 'inc' : 'exp', split: !!oldSplits && !isTr,
+      photo: t ? (t.photo || null) : null, photoBlob: null, photoPending: !!(t && t.photoPending) };
+    const catList = () => App.data.categories.filter(c => c.type === (state.kind === 'inc' ? 'income' : 'expense'));
+
+    const recalcSplit = () => {
+      const info = $('#splitInfo', sheet);
+      if (!info) return;
+      const rows = $$('.srow', sheet);
+      if (!rows.length) { info.textContent = 'Добавь хотя бы две строки'; info.style.color = ''; return; }
+      let sum = 0;
+      rows.forEach(r => { sum += Math.abs(Money.toMinor($('.f-split-amt', r).value)); });
+      const total = Math.abs(Money.toMinor($('#fAmount', sheet).value));
+      const left = total - sum;
+      if (left === 0) { info.textContent = 'Распределено полностью'; info.style.color = 'var(--pos)'; }
+      else if (left > 0) { info.textContent = 'Осталось: ' + Money.fmt(left); info.style.color = 'var(--muted)'; }
+      else { info.textContent = 'Перебор: ' + Money.fmt(-left); info.style.color = 'var(--neg)'; }
+    };
+
+    const addSplitRow = (catId, val) => {
+      const list = catList();
+      const sel = catId || (list[0] ? list[0].id : '');
+      const el = document.createElement('div');
+      el.className = 'srow';
+      el.innerHTML = `<select class="f-split-cat">${list.map(c => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+        <input class="f-split-amt" inputmode="decimal" placeholder="0.00" value="${val || ''}">
+        <button class="btn danger sm" type="button">×</button>`;
+      $('button', el).onclick = () => {
+        if ($$('.srow', sheet).length <= 2) { toast('Минимум две категории'); return; }
+        el.remove(); recalcSplit();
+      };
+      $('.f-split-amt', el).addEventListener('input', recalcSplit);
+      $('#splitRows', sheet).appendChild(el);
+    };
+
+    const setSplit = on => {
+      state.split = on;
+      $('#splitWrap', sheet).style.display = on ? '' : 'none';
+      $('#splitOnWrap', sheet).style.display = on ? 'none' : '';
+      $('#catWrap', sheet).style.display = (on || state.kind === 'tr') ? 'none' : '';
+      $('#splitRows', sheet).innerHTML = '';
+      if (!on) return;
+      if (oldSplits && oldSplits.length) {
+        oldSplits.forEach(s => addSplitRow(s.categoryId, (Math.abs(s.amount) / 100).toFixed(2)));
+      } else {
+        const total = Math.abs(Money.toMinor($('#fAmount', sheet).value));
+        addSplitRow($('#fCat', sheet).value, total ? (total / 100).toFixed(2) : '');
+        addSplitRow('', '');
+      }
+      recalcSplit();
+    };
+
+    if (oldSplits && !isTr) setSplit(true);
+    $('#fSplitOn', sheet).onclick = () => setSplit(true);
+    $('#fSplitOff', sheet).onclick = () => setSplit(false);
+    $('#fSplitAdd', sheet).onclick = () => { addSplitRow('', ''); recalcSplit(); };
+    $('#fAmount', sheet).addEventListener('input', () => { if (state.split) recalcSplit(); });
+
+    const paintPhoto = async () => {
+      const box = $('#photoBox', sheet);
+      if (!box) return;
+      box.innerHTML = '';
+      $('#photoDel', sheet).style.display = state.photo ? '' : 'none';
+      const hint = $('#photoHint', sheet);
+      if (!state.photo) { hint.textContent = 'Фото сжимается до 1600 px и хранится на Яндекс.Диске.'; return; }
+      let src = null;
+      if (state.photoBlob) src = URL.createObjectURL(state.photoBlob);
+      else src = await photoSrc(state.photo);
+      if (!src) { hint.textContent = 'Фото есть в облаке — подключи Яндекс.Диск, чтобы посмотреть.'; return; }
+      const im = document.createElement('img');
+      im.className = 'thumb'; im.src = src; im.alt = 'чек';
+      im.onclick = () => openPhotoViewer(src);
+      box.appendChild(im);
+      hint.textContent = state.photoPending ? 'Снято без сети — уедет на Диск при синхронизации.' : '';
+    };
+
+    $('#photoAdd', sheet).onclick = () => $('#photoFile', sheet).click();
+    $('#photoFile', sheet).onchange = async e => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      $('#photoHint', sheet).textContent = 'Сжимаю…';
+      try {
+        const blob = await shrinkImage(f);
+        state.photoBlob = blob;
+        state.photo = 'ph_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6) + '.jpg';
+        state.photoPending = true;
+        paintPhoto();
+      } catch (err) { $('#photoHint', sheet).textContent = 'Не удалось обработать фото'; }
+    };
+    $('#photoDel', sheet).onclick = () => {
+      state.photo = null; state.photoBlob = null; state.photoPending = false; paintPhoto();
+    };
+    paintPhoto();
+
+    const refreshCats = () => {
+      const list = catList();
       $('#fCat', sheet).innerHTML = list.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+      $$('.srow', sheet).forEach(r => {
+        const sel = $('.f-split-cat', r);
+        const cur = sel.value;
+        sel.innerHTML = list.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+        if (list.some(c => c.id === cur)) sel.value = cur;
+      });
     };
     const applyKind = k => {
       state.kind = k;
       $$('#segKind button', sheet).forEach(b => b.classList.toggle('on', b.dataset.k === k));
       $('#acc2Wrap', sheet).style.display = k === 'tr' ? '' : 'none';
-      $('#catWrap', sheet).style.display = k === 'tr' ? 'none' : '';
-      if (k !== 'tr') refreshCats(k);
+      if (k === 'tr') {
+        $('#splitWrap', sheet).style.display = 'none';
+        $('#splitOnWrap', sheet).style.display = 'none';
+        $('#catWrap', sheet).style.display = 'none';
+      } else {
+        $('#catWrap', sheet).style.display = state.split ? 'none' : '';
+        $('#splitOnWrap', sheet).style.display = state.split ? 'none' : '';
+        refreshCats();
+        if (state.split) recalcSplit();
+      }
     };
     $$('#segKind button', sheet).forEach(b => b.onclick = () => applyKind(b.dataset.k));
 
-    $('#fSave', sheet).onclick = () => {
+    $('#fSave', sheet).onclick = async () => {
+      const oldPhoto = t ? (t.photo || null) : null;
       const amt = Math.abs(Money.toMinor($('#fAmount', sheet).value));
       if (!amt) { toast('Введите сумму'); return; }
       const date = $('#fDate', sheet).value || D.today();
@@ -438,11 +653,49 @@ function editTransaction(id, kind) {
         App.data.transactions.push({ id: tid, accountId: accId, date, amount: -amt, transferAccountId: acc2, note, updatedAt: Date.now() });
         App.data.transactions.push({ id: uid(), accountId: acc2, date, amount: amt, transferAccountId: accId, note, updatedAt: Date.now() });
       } else {
-        const amount = state.kind === 'inc' ? amt : -amt;
-        if (t) Object.assign(t, { accountId: accId, date, amount, categoryId: catId, payee, note, transferAccountId: null, updatedAt: Date.now() });
-        else App.data.transactions.push({ id: uid(), accountId: accId, date, amount, categoryId: catId, payee, note, updatedAt: Date.now() });
+        const sign = state.kind === 'inc' ? 1 : -1;
+        let splits = null;
+        if (state.split) {
+          const parts = $$('.srow', sheet).map(r => ({
+            categoryId: $('.f-split-cat', r).value,
+            amount: Math.abs(Money.toMinor($('.f-split-amt', r).value))
+          })).filter(p => p.amount > 0);
+          if (parts.length < 2) { toast('Нужно минимум две категории с суммой'); return; }
+          const sum = parts.reduce((s, p) => s + p.amount, 0);
+          if (sum !== amt) { toast('Сумма частей ' + Money.fmt(sum) + ' ≠ ' + Money.fmt(amt)); return; }
+          splits = parts.map(p => ({ categoryId: p.categoryId, amount: sign * p.amount }));
+        }
+        const amount = sign * amt;
+        if (state.photo && state.photoBlob) {
+          try { await PhotoStore.put(state.photo, state.photoBlob); } catch (e) {}
+        }
+        const patch = { accountId: accId, date, amount, categoryId: catId, payee, note, transferAccountId: null,
+          photo: state.photo || null, photoPending: state.photo ? !!state.photoPending : false,
+          updatedAt: Date.now(), splits: null };
+        if (splits) { patch.splits = splits; patch.categoryId = splits[0].categoryId; }
+        if (t) Object.assign(t, patch);
+        else App.data.transactions.push(Object.assign({ id: uid() }, patch));
       }
       saveData(); closeSheet(); render();
+
+      const token = ((App.data.settings.yd || {}).token || '').trim();
+      if (oldPhoto && oldPhoto !== state.photo) {
+        PhotoStore.del(oldPhoto).catch(() => {});
+        if (token) ydPhotoDelete(token, oldPhoto);
+      }
+      if (state.photo && state.photoBlob && state.kind !== 'tr') {
+        const name = state.photo, blob = state.photoBlob;
+        (async () => {
+          try {
+            await PhotoStore.put(name, blob);
+            if (!token) return;
+            await ydPhotoUpload(token, name, blob);
+            const tr = App.data.transactions.find(x => x.photo === name);
+            if (tr) { tr.photoPending = false; saveData(); }
+            toast('Фото загружено на Диск');
+          } catch (e) { /* останется в очереди до следующей синхронизации */ }
+        })();
+      }
     };
     if (t) $('#fDel', sheet).onclick = () => {
       App.data.transactions = App.data.transactions.filter(x => x.id !== t.id && !(x.transferAccountId === t.accountId && x.date === t.date && x.amount === -t.amount && t.transferAccountId));
