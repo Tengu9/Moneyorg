@@ -9,7 +9,7 @@ const App = {
 };
 
 const STORE_KEY = 'cash.data.v1';
-const APP_VERSION = '0.6';
+const APP_VERSION = '0.7';
 
 /* ---------- хранилище ---------- */
 function loadData() {
@@ -107,7 +107,9 @@ function openPhotoViewer(src) {
     document.body.appendChild(v);
     v.onclick = e => { if (e.target === v || e.target.id === 'vClose') v.classList.add('hidden'); };
   }
-  v.querySelector('img').src = src;
+  const vi = v.querySelector('img');
+  vi.referrerPolicy = 'no-referrer';
+  vi.src = src;
   v.classList.remove('hidden');
 }
 
@@ -617,6 +619,7 @@ function editTransaction(id, kind) {
       if (!src) { hint.textContent = 'Фото есть в облаке — подключи Яндекс.Диск, чтобы посмотреть.'; return; }
       const im = document.createElement('img');
       im.className = 'thumb'; im.src = src; im.alt = 'чек';
+      im.referrerPolicy = 'no-referrer';
       im.onclick = () => openPhotoViewer(src);
       box.appendChild(im);
       hint.textContent = state.photoPending ? 'Снято без сети — уедет на Диск при синхронизации.' : '';

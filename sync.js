@@ -127,7 +127,10 @@ async function ydGetHref(href, token, as) {
     const host = (String(url).match(/^https:\/\/([^/:]+)/) || [])[1] || '?';
     for (const withAuth of [false, true]) {
       try {
-        const opts = withAuth ? { headers: { Authorization: 'OAuth ' + token } } : undefined;
+        /* Яндекс отдаёт 403, если пришёл чужой Referer (защита от хотлинка),
+           поэтому просим браузер его не отправлять */
+        const opts = { referrerPolicy: 'no-referrer' };
+        if (withAuth) opts.headers = { Authorization: 'OAuth ' + token };
         const r = await fetch(url, opts);
         if (!r.ok) throw httpErr('скачивание', r);
         return as === 'blob' ? await r.blob() : await r.text();
