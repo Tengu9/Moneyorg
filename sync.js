@@ -84,9 +84,44 @@ async function ydDownload(token) {
   if (meta.status === 404) return null;
   if (!meta.ok) throw httpErr('файл', meta);
   const { href } = await meta.json();
-  const file = await fetch(href);
-  if (!file.ok) throw httpErr('скачивание', file);
-  return await file.text();
+  if (!href) throw new Error('Диск не выдал ссылку на файл');
+  return await ydGetHref(href, token, 'text');
+}
+
+/* скачивание по выданной ссылке: обычный fetch → fetch с токеном → XHR.
+   У Яндекса ссылка ведёт на отдельный хост, и в мобильных браузерах обычный
+   запрос иногда режется, поэтому пробуем несколько путей. */
+function xhrGet(url, token, as) {
+  return new Promise((res, rej) => {
+    const x = new XMLHttpRequest();
+    x.open('GET', url, true);
+    if (token) x.setRequestHeader('Authorization', 'OAuth ' + token);
+    x.responseType = as === 'blob' ? 'blob' : 'text';
+    x.timeout = 25000;
+    x.onload = () => (x.status >= 200 && x.status < 300)
+      ? res(x.responseType === 'blob' ? x.response : x.responseText)
+      : rej(Object.assign(new Error('HTTP ' + x.status), { status: x.status }));
+    x.onerror = () => rej(new TypeError('XHR: сеть недоступна'));
+    x.ontimeout = () => rej(new TypeError('XHR: таймаут'));
+    x.send();
+  });
+}
+
+async function ydGetHref(href, token, as) {
+  let lastErr = null;
+  const attempts = [
+    () => fetch(href),
+    () => fetch(href, { headers: { Authorization: 'OAuth ' + token } })
+  ];
+  for (const a of attempts) {
+    try {
+      const r = await a();
+      if (!r.ok) throw httpErr('скачивание', r);
+      return as === 'blob' ? await r.blob() : await r.text();
+    } catch (e) { lastErr = e; }
+  }
+  try { return await xhrGet(href, token, as); }
+  catch (e) { throw lastErr || e; }
 }
 
 async function ydUpload(token, text) {
@@ -165,11 +200,17 @@ async function ydDoctor() {
     const r = await ydReq(YD.api + '/resources/download?path=' + encodeURIComponent(YD.file), token);
     if (r.status === 404) return 'файла ещё нет';
     if (!r.ok) throw httpErr('файл', r);
-    const { href } = await r.json();
-    const host = (String(href).match(/^https:\/\/([^/:]+)/) || [])[1] || '?';
-    const f = await fetch(href);
-    if (!f.ok) throw httpErr('скачивание', f);
-    return (await f.text()).length + ' симв., хост ' + host;
+    const j = await r.json();
+    if (!j.href) throw new Error('в ответе API нет ссылки');
+    const host = (String(j.href).match(/^https:\/\/([^/:]+)/) || [])[1] || '?';
+    const res = [];
+    try { const f = await fetch(j.href); res.push('обычный: ' + f.status + (f.ok ? ' ✔' : ' ✘')); }
+    catch (e) { res.push('обычный: ✘ ' + e.message); }
+    try { const f = await fetch(j.href, { headers: { Authorization: 'OAuth ' + token } }); res.push('с токеном: ' + f.status + (f.ok ? ' ✔' : ' ✘')); }
+    catch (e) { res.push('с токеном: ✘ ' + e.message); }
+    try { const t = await xhrGet(j.href, token, 'text'); res.push('XHR: ✔ ' + t.length + ' симв.'); }
+    catch (e) { res.push('XHR: ✘ ' + e.message); }
+    return 'хост ' + host + ' · ' + res.join(' · ');
   });
   const probe = async (label, contentType) => {
     await step(label, async () => {

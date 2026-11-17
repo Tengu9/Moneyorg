@@ -9,7 +9,7 @@ const App = {
 };
 
 const STORE_KEY = 'cash.data.v1';
-const APP_VERSION = '0.4';
+const APP_VERSION = '0.5';
 
 /* ---------- хранилище ---------- */
 function loadData() {
@@ -89,8 +89,11 @@ async function photoSrc(name) {
   if (!token) return null;
   try {
     const href = await ydPhotoHref(token, name);
-    fetch(href).then(r => r.blob()).then(b => PhotoStore.put(name, b)).catch(() => {});
-    return href;
+    try {
+      const b = await ydGetHref(href, token, 'blob');
+      await PhotoStore.put(name, b).catch(() => {});
+      return URL.createObjectURL(b);
+    } catch (e) { return href; }
   } catch (e) { return null; }
 }
 
