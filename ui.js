@@ -9,7 +9,7 @@ const App = {
 };
 
 const STORE_KEY = 'cash.data.v1';
-const APP_VERSION = '1.1';
+const APP_VERSION = '1.2';
 
 /* ---------- хранилище ---------- */
 function loadData() {
@@ -169,6 +169,26 @@ function catName(id) {
     if (p) return p.name + ' › ' + c.name;
   }
   return c.name;
+}
+
+/* ключ «похожести» операции: контрагент, иначе начало описания */
+function merchantKey(t) {
+  if (!t) return null;
+  const p = String(t.payee || '').trim().toLowerCase();
+  if (p) return 'p:' + p;
+  const n = String(t.note || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (n) return 'n:' + n.slice(0, 30);
+  return null;
+}
+
+/* категория из запомненного правила для этого контрагента */
+function ruleCat(key, type) {
+  if (!key) return null;
+  const rules = (App.data.settings || {}).rules || {};
+  const id = rules[key];
+  if (!id) return null;
+  const c = App.data.categories.find(x => x.id === id);
+  return c && c.type === type ? id : null;
 }
 
 /* опции для селекта категорий: корневые + подкатегории с отступом */
@@ -597,6 +617,7 @@ function editTransaction(id, kind) {
         <button class="btn soft sm" id="catAddBtn" type="button">+</button>
       </div>
     </div>
+    <label class="check" id="applyAllWrap" style="${t && !oldSplits && !isTr ? '' : 'display:none'}"><input type="checkbox" id="fApplyAll" checked><span>Применить категорию ко всем с похожим названием</span></label>
     <div class="field" id="splitWrap" style="${oldSplits && !isTr ? '' : 'display:none'}">
       <label>Разбивка по категориям</label>
       <div id="splitRows"></div>
@@ -855,12 +876,29 @@ function editTransaction(id, kind) {
         if (state.photo && state.photoBlob) {
           try { await PhotoStore.put(state.photo, state.photoBlob); } catch (e) {}
         }
+        const finalCat = splits ? splits[0].categoryId : catId;
+        const mkey = t ? merchantKey(t) : null;
+        const applyAllChk = $('#fApplyAll', sheet);
+        const applyAll = !!(t && !splits && mkey && applyAllChk && applyAllChk.checked && finalCat !== t.categoryId && finalCat);
         const patch = { accountId: accId, date, amount, categoryId: catId, payee, note, transferAccountId: null,
           photo: state.photo || null, photoPending: state.photo ? !!state.photoPending : false,
           updatedAt: Date.now(), splits: null };
         if (splits) { patch.splits = splits; patch.categoryId = splits[0].categoryId; }
         if (t) Object.assign(t, patch);
         else App.data.transactions.push(Object.assign({ id: uid() }, patch));
+        if (applyAll) {
+          const now = Date.now();
+          let n = 0;
+          for (const x of App.data.transactions) {
+            if (x.id === t.id || x.deleted || x.transferAccountId) continue;
+            if ((x.amount > 0) !== (t.amount > 0)) continue;
+            if (merchantKey(x) !== mkey) continue;
+            x.categoryId = finalCat; x.splits = null; x.updatedAt = now;
+            n++;
+          }
+          App.data.settings.rules = Object.assign({}, App.data.settings.rules || {}, { [mkey]: finalCat });
+          if (n) toast('Категория обновлена ещё у ' + n + ' операций');
+        }
       }
       saveData(); closeSheet(); render();
 
@@ -1283,9 +1321,11 @@ async function importStatementFile(file) {
           addOne({ accountId: a2, date: t.date, amount: -t.amount, transferAccountId: a1, note: t.desc });
         } else {
           const accId = pdfMode ? selAcc : ensureAccount(t.accountName);
+          const ctype = t.amount > 0 ? 'income' : 'expense';
+          const mkey = merchantKey({ payee: t.payee, note: t.desc });
           addOne({
             accountId: accId, date: t.date, amount: t.amount,
-            categoryId: pdfMode ? stmtCatId(t.desc, t.amount) : zenCategory(t.categoryName, t.amount > 0 ? 'income' : 'expense'),
+            categoryId: ruleCat(mkey, ctype) || (pdfMode ? stmtCatId(t.desc, t.amount) : zenCategory(t.categoryName, ctype)),
             payee: t.payee || '', note: t.desc
           });
         }
