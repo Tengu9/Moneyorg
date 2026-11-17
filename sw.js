@@ -1,6 +1,6 @@
 ﻿/* sw.js — офлайн-кэш. ВАЖНО: при каждом релизе менять CACHE (v2 → v3 …),
    иначе браузер продолжит отдавать старые файлы. */
-const CACHE = 'cash-v13';
+const CACHE = 'cash-v14';
 const ASSETS = ['./', './index.html', './app.css', './core.js', './sync.js', './ui.js', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', e => {

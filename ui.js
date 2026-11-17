@@ -9,7 +9,7 @@ const App = {
 };
 
 const STORE_KEY = 'cash.data.v1';
-const APP_VERSION = '1.0';
+const APP_VERSION = '1.1';
 
 /* ---------- хранилище ---------- */
 function loadData() {
@@ -430,9 +430,9 @@ function viewSettings() {
       </div>
       <input type="file" id="importFile" accept=".json,application/json" style="display:none">
       <div class="fab-row" style="margin:10px 0 0">
-        <button class="btn ghost block" data-act="stmt">Загрузить выписку банка (PDF)</button>
+        <button class="btn ghost block" data-act="stmt">Загрузить выписку (PDF/CSV)</button>
       </div>
-      <input type="file" id="stmtFile" accept=".pdf,application/pdf" style="display:none">
+      <input type="file" id="stmtFile" accept=".pdf,.csv,application/pdf,text/csv" style="display:none">
       <div class="fab-row" style="margin:10px 0 0">
         <button class="btn danger" data-act="wipe-local">Очистить базу</button>
         <button class="btn danger" data-act="wipe-cloud">Очистить бэкап</button>
@@ -1130,60 +1130,172 @@ function stmtCatId(desc, amount) {
   return c.id;
 }
 
+/* ---------- импорт CSV из ZenMoney ---------- */
+function csvRows(text) {
+  const rows = [];
+  let row = [], cur = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { cur += '"'; i++; }
+        else q = false;
+      } else cur += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === ';') { row.push(cur); cur = ''; }
+    else if (ch === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; }
+    else if (ch !== '\r') cur += ch;
+  }
+  if (cur.length || row.length) { row.push(cur); rows.push(row); }
+  return rows;
+}
+
+function zenAmount(s) {
+  const v = parseFloat(String(s || '').replace(/\s/g, '').replace(',', '.'));
+  return isFinite(v) ? Math.round(v * 100) : 0;
+}
+
+/* формат ZenMoney: date;categoryName;payee;comment;outcomeAccountName;outcome;... */
+function parseZenMoney(text) {
+  const rows = csvRows(String(text).replace(/^\uFEFF/, ''));
+  if (!rows.length) return [];
+  const head = rows.shift().map(h => h.trim());
+  const col = {};
+  head.forEach((h, i) => { col[h] = i; });
+  const get = (r, k) => (col[k] == null ? '' : String(r[col[k]] || '').trim());
+  const out = [];
+  for (const r of rows) {
+    const date = get(r, 'date');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    const cur = get(r, 'outcomeCurrencyShortTitle') || 'RUB';
+    const incCur = get(r, 'incomeCurrencyShortTitle') || 'RUB';
+    if (cur !== 'RUB' || incCur !== 'RUB') continue;
+    const outAmt = zenAmount(get(r, 'outcome'));
+    const incAmt = zenAmount(get(r, 'income'));
+    if (!outAmt && !incAmt) continue;
+    const outAcc = get(r, 'outcomeAccountName');
+    const incAcc = get(r, 'incomeAccountName');
+    const payee = get(r, 'payee');
+    const comment = get(r, 'comment');
+    const cat = get(r, 'categoryName');
+    const desc = [payee, comment].filter(Boolean).join(' · ');
+    if (outAmt && incAmt && outAcc && incAcc && outAcc !== incAcc) {
+      out.push({ date, amount: -outAmt, accountName: outAcc, transferTo: incAcc, desc, categoryName: '', payee: '' });
+      continue;
+    }
+    if (outAmt) out.push({ date, amount: -outAmt, accountName: outAcc, desc, categoryName: cat, payee });
+    else out.push({ date, amount: incAmt, accountName: incAcc, desc, categoryName: cat, payee });
+  }
+  return out;
+}
+
+/* категория по пути «Родитель / Ребёнок»; при «A, B» берём первую */
+function zenCategory(name, type) {
+  let nm = String(name || '').split(',')[0].trim();
+  if (!nm) nm = type === 'income' ? 'Прочий доход' : 'Прочее';
+  const parts = nm.split(' / ').map(s => s.trim()).filter(Boolean);
+  let parentId = null, cur = null;
+  for (const part of parts) {
+    let c = App.data.categories.find(x => x.name.toLowerCase() === part.toLowerCase() && x.type === type && (x.parentId || null) === parentId);
+    if (!c) {
+      c = { id: 'cat' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name: part, type, parentId, updatedAt: Date.now() };
+      App.data.categories.push(c);
+    }
+    cur = c;
+    parentId = c.id;
+  }
+  return cur ? cur.id : null;
+}
+
+function ensureAccount(name) {
+  const nm = String(name || '').trim() || 'Импорт';
+  let a = App.data.accounts.find(x => x.name === nm && !x.closed);
+  if (!a) {
+    a = { id: uid(), name: nm, type: 'cash', opening: 0, sort: App.data.accounts.length, closed: false, updatedAt: Date.now() };
+    App.data.accounts.push(a);
+  }
+  return a.id;
+}
+
 async function importStatementFile(file) {
   if (!file) return;
-  toast('Читаю выписку…');
-  let txs;
+  const fname = (file.name || '').toLowerCase();
+  const isCsv = fname.endsWith('.csv') || file.type === 'text/csv';
+  toast(isCsv ? 'Читаю CSV…' : 'Читаю выписку…');
+  let txs = [];
   try {
-    const buf = await file.arrayBuffer();
-    const lines = await pdfToLines(buf);
-    txs = parseTbankStatement(lines);
+    if (isCsv) {
+      txs = parseZenMoney(await file.text());
+    } else {
+      const buf = await file.arrayBuffer();
+      const lines = await pdfToLines(buf);
+      txs = parseTbankStatement(lines);
+    }
   } catch (e) {
-    toast('Не удалось прочитать PDF: ' + ((e && e.message) || e));
+    toast('Не удалось прочитать файл: ' + ((e && e.message) || e));
     return;
   }
   if (!txs.length) { toast('В файле не нашлось операций'); return; }
+
+  const pdfMode = !txs[0].accountName;
   const accs = App.data.accounts.filter(a => !a.closed);
-  if (!accs.length) { toast('Сначала добавь счёт'); return; }
+  if (pdfMode && !accs.length) { toast('Сначала добавь счёт'); return; }
 
   const dates = txs.map(t => t.date).sort();
   const inc = txs.filter(t => t.amount > 0).reduce((s, t) => s + t.amount, 0);
   const exp = txs.filter(t => t.amount < 0).reduce((s, t) => s + t.amount, 0);
   const accOpts = accs.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  const fileAccs = [...new Set(txs.reduce((acc, t) => {
+    if (t.accountName) acc.push(t.accountName);
+    if (t.transferTo) acc.push(t.transferTo);
+    return acc;
+  }, []))];
 
   openSheet(`
-    <h3>Выписка из банка</h3>
+    <h3>Импорт операций</h3>
     <div class="stats" style="margin-bottom:12px">
       <div class="stat"><div class="k">Операций</div><div class="v">${txs.length}</div></div>
       <div class="stat"><div class="k">Период</div><div class="v" style="font-size:14px">${D.ru(dates[0])} – ${D.ru(dates[dates.length - 1])}</div></div>
       <div class="stat"><div class="k">Приход</div><div class="v pos">${Money.fmt(inc)}</div></div>
       <div class="stat"><div class="k">Расход</div><div class="v neg">${Money.fmt(exp)}</div></div>
     </div>
-    <div class="field"><label>Зачислить на счёт</label><select id="stAcc">${accOpts}</select></div>
+    <div class="field" id="stAccWrap" style="${pdfMode ? '' : 'display:none'}"><label>Зачислить на счёт</label><select id="stAcc">${accOpts}</select></div>
+    <div class="hint" id="stAccList" style="${pdfMode ? 'display:none' : ''}">Счета из файла: ${fileAccs.map(esc).join(', ')}</div>
     <div class="actions"><button class="btn" id="stGo">Импортировать</button></div>
     <div class="hint">Операции, которые уже есть в базе (та же дата, сумма и описание), пропускаются.
-      Категории подставляются по описанию.</div>
+      Категории из файла сохраняются вместе с подкатегориями; переводы создаются парами.</div>
   `, sheet => {
     $('#stGo', sheet).onclick = () => {
-      const accId = $('#stAcc', sheet).value;
+      const selAcc = pdfMode ? $('#stAcc', sheet).value : null;
       const seen = new Set(App.data.transactions.map(t => t.date + '|' + t.amount + '|' + (t.note || '').slice(0, 40).toLowerCase()));
       const now = Date.now();
       let added = 0, dup = 0;
-      for (const t of txs) {
-        const key = t.date + '|' + t.amount + '|' + t.desc.slice(0, 40).toLowerCase();
-        if (seen.has(key)) { dup++; continue; }
-        /* в seen не добавляем: одинаковые операции внутри одной выписки должны импортироваться все */
-        App.data.transactions.push({
-          id: uid(), accountId: accId, date: t.date, amount: t.amount,
-          categoryId: stmtCatId(t.desc, t.amount), payee: '', note: t.desc, updatedAt: now
-        });
+      const addOne = obj => {
+        const key = obj.date + '|' + obj.amount + '|' + (obj.note || '').slice(0, 40).toLowerCase();
+        if (seen.has(key)) { dup++; return; }
+        App.data.transactions.push(Object.assign({ id: uid(), updatedAt: now }, obj));
         added++;
+      };
+      for (const t of txs) {
+        if (t.transferTo) {
+          const a1 = ensureAccount(t.accountName), a2 = ensureAccount(t.transferTo);
+          addOne({ accountId: a1, date: t.date, amount: t.amount, transferAccountId: a2, note: t.desc });
+          addOne({ accountId: a2, date: t.date, amount: -t.amount, transferAccountId: a1, note: t.desc });
+        } else {
+          const accId = pdfMode ? selAcc : ensureAccount(t.accountName);
+          addOne({
+            accountId: accId, date: t.date, amount: t.amount,
+            categoryId: pdfMode ? stmtCatId(t.desc, t.amount) : zenCategory(t.categoryName, t.amount > 0 ? 'income' : 'expense'),
+            payee: t.payee || '', note: t.desc
+          });
+        }
       }
       saveData(); closeSheet(); render();
       toast('Импортировано ' + added + (dup ? ', пропущено дублей: ' + dup : ''));
     };
   });
 }
+
 
 function exportJSON() {  const blob = new Blob([JSON.stringify(App.data, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
