@@ -137,6 +137,63 @@ async function flushPendingPhotos(token) {
   return done;
 }
 
+/* пошаговая проверка Диска: показывает, на каком запросе рвётся */
+async function ydDoctor() {
+  const token = ((App.data.settings.yd || {}).token || '').trim();
+  if (!token) { toast('Сначала войди в Яндекс'); return; }
+  const out = [];
+  const step = async (name, fn) => {
+    try { const info = await fn(); out.push('✔ ' + name + (info ? ': ' + info : '')); }
+    catch (e) { out.push('✘ ' + name + ': ' + ((e && e.message) || e) + (e && e.status ? ' [HTTP ' + e.status + ']' : '')); }
+  };
+
+  await step('Яндекс ID', async () => {
+    const r = await fetch('https://login.yandex.ru/info?format=json', { headers: { Authorization: 'OAuth ' + token } });
+    if (!r.ok) throw httpErr('whoami', r);
+    const j = await r.json();
+    return j.login || j.default_email || 'ok';
+  });
+  await step('Диск', async () => {
+    const r = await fetch(YD.api + '/?fields=total_space,used_space', { headers: { Authorization: 'OAuth ' + token } });
+    if (!r.ok) throw httpErr('диск', r);
+    const j = await r.json();
+    const free = Math.round(((j.total_space || 0) - (j.used_space || 0)) / 1048576);
+    return free + ' МБ свободно';
+  });
+  await step('папка app:/Cash', async () => { await ydEnsureFolder(token); return 'ok'; });
+  await step('чтение данных', async () => {
+    const r = await ydReq(YD.api + '/resources/download?path=' + encodeURIComponent(YD.file), token);
+    if (r.status === 404) return 'файла ещё нет';
+    if (!r.ok) throw httpErr('файл', r);
+    const { href } = await r.json();
+    const host = (String(href).match(/^https:\/\/([^/:]+)/) || [])[1] || '?';
+    const f = await fetch(href);
+    if (!f.ok) throw httpErr('скачивание', f);
+    return (await f.text()).length + ' симв., хост ' + host;
+  });
+  const probe = async (label, contentType) => {
+    await step(label, async () => {
+      const path = YD.folder + '/probe.json';
+      const r = await ydReq(YD.api + '/resources/upload?path=' + encodeURIComponent(path) + '&overwrite=true', token);
+      if (!r.ok) throw httpErr('upload-url', r);
+      const { href } = await r.json();
+      const host = (String(href).match(/^https:\/\/([^/:]+)/) || [])[1] || '?';
+      const opts = { method: 'PUT', body: '{"probe":1}' };
+      if (contentType) opts.headers = { 'Content-Type': contentType };
+      const put = await fetch(href, opts);
+      if (!put.ok) throw httpErr('PUT', put);
+      ydReq(YD.api + '/resources?path=' + encodeURIComponent(path), token, { method: 'DELETE' }).catch(() => {});
+      return 'ok, хост ' + host;
+    });
+  };
+  await probe('запись 1 КБ (application/json)', 'application/json');
+  await probe('запись 1 КБ (text/plain, без preflight)', null);
+
+  out.push('');
+  out.push('браузер: ' + navigator.userAgent);
+  showDoctor(out.join('\n'));
+}
+
 /* слияние: побеждает запись с более свежим updatedAt */
 function mergeList(local, remote) {
   const map = new Map();
@@ -175,10 +232,15 @@ function setSyncStatus(msg) {
 async function yandexSync() {
   const token = ((App.data.settings.yd || {}).token || '').trim();
   if (!token) { toast('Вставь OAuth-токен Яндекс.Диска'); return; }
-  setSyncStatus('Синхронизация…');
+  let step = 'папка';
+  setSyncStatus('Синхронизация: папка…');
   try {
     await ydEnsureFolder(token);
+    step = 'фото';
+    setSyncStatus('Синхронизация: фото…');
     await flushPendingPhotos(token);
+    step = 'чтение';
+    setSyncStatus('Синхронизация: чтение…');
     const remoteText = await ydDownload(token);
     let merged = App.data;
     if (remoteText) {
@@ -189,6 +251,8 @@ async function yandexSync() {
     App.data = Object.assign(emptyData(), merged);
     App.data.settings = Object.assign({ currency: '₽', horizon: 6, tg: {}, yd: {} }, App.data.settings || {});
     saveData();
+    step = 'запись';
+    setSyncStatus('Синхронизация: запись…');
     await ydUpload(token, JSON.stringify(App.data));
     render();
     setSyncStatus('Готово: ' + new Date().toLocaleTimeString('ru-RU'));
@@ -199,7 +263,7 @@ async function yandexSync() {
       saveData();
       render();
     }
-    const msg = ydHumanError(e);
+    const msg = step + ': ' + ydHumanError(e);
     setSyncStatus(msg);
     toast(msg);
   }

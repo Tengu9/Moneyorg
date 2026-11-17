@@ -9,7 +9,7 @@ const App = {
 };
 
 const STORE_KEY = 'cash.data.v1';
-const APP_VERSION = '0.3';
+const APP_VERSION = '0.4';
 
 /* ---------- хранилище ---------- */
 function loadData() {
@@ -106,6 +106,31 @@ function openPhotoViewer(src) {
   }
   v.querySelector('img').src = src;
   v.classList.remove('hidden');
+}
+
+/* отчёт пошаговой проверки Диска */
+function showDoctor(text) {
+  openSheet(`
+    <h3>Проверка Яндекс.Диска</h3>
+    <pre class="doctor">${esc(text)}</pre>
+    <div class="actions">
+      <button class="btn" id="dCopy">Скопировать</button>
+      <button class="btn soft" id="dClose">Закрыть</button>
+    </div>
+    <div class="hint">Если есть строки с ✘ — пришли этот текст целиком.</div>
+  `, sheet => {
+    $('#dClose', sheet).onclick = closeSheet;
+    $('#dCopy', sheet).onclick = async () => {
+      try { await navigator.clipboard.writeText(text); toast('Скопировано'); }
+      catch (e) {
+        const r = document.createRange();
+        r.selectNodeContents($('.doctor', sheet));
+        const sel = window.getSelection();
+        sel.removeAllRanges(); sel.addRange(r);
+        toast('Выделено — скопируй вручную');
+      }
+    };
+  });
 }
 
 /* ---------- утилиты ---------- */
@@ -363,7 +388,8 @@ function viewSettings() {
         <div class="fab-row" style="margin:12px 0 0">
           <button class="btn" data-act="yd-sync" style="flex:1">Синхронизировать</button>
           <button class="btn danger" data-act="yd-logout">Отключить</button>
-        </div>`
+        </div>
+        <button class="btn ghost block" data-act="yd-doctor" style="margin-top:8px">Проверить Диск</button>`
       : `
         <div class="sub">Войди через Яндекс ID — приложение получит доступ только к своей папке на Диске.</div>
         <div class="fab-row" style="margin:12px 0 0"><button class="btn block" data-act="yd-login">Войти через Яндекс</button></div>
@@ -406,6 +432,7 @@ function act(name) {
   else if (name === 'export') exportJSON();
   else if (name === 'import') $('#importFile').click();
   else if (name === 'yd-sync') yandexSync();
+  else if (name === 'yd-doctor') ydDoctor();
   else if (name === 'yd-login') YA.login();
   else if (name === 'yd-logout') {
     if (!confirm('Отключить Яндекс.Диск? Файл на Диске останется.')) return;
