@@ -9,7 +9,7 @@ const App = {
 };
 
 const STORE_KEY = 'cash.data.v1';
-const APP_VERSION = '0.7';
+const APP_VERSION = '0.8';
 
 /* ---------- хранилище ---------- */
 function loadData() {
@@ -161,7 +161,35 @@ const ICON_SVG = {
 };
 
 function accTypeName(t) { return t === 'card' ? 'Карта' : t === 'deposit' ? 'Вклад' : 'Наличные'; }
-function catName(id) { const c = App.data.categories.find(x => x.id === id); return c ? c.name : 'Без категории'; }
+function catName(id) {
+  const c = App.data.categories.find(x => x.id === id);
+  if (!c) return 'Без категории';
+  if (c.parentId) {
+    const p = App.data.categories.find(x => x.id === c.parentId);
+    if (p) return p.name + ' › ' + c.name;
+  }
+  return c.name;
+}
+
+/* опции для селекта категорий: корневые + подкатегории с отступом */
+function catOptionsHtml(list, sel) {
+  const roots = list.filter(c => !c.parentId);
+  const byParent = {};
+  list.filter(c => c.parentId).forEach(c => {
+    (byParent[c.parentId] = byParent[c.parentId] || []).push(c);
+  });
+  let html = '';
+  const opt = (c, prefix) => {
+    html += `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${prefix}${esc(c.name)}</option>`;
+  };
+  for (const r of roots) {
+    opt(r, '');
+    for (const k of (byParent[r.id] || [])) opt(k, '— ');
+    delete byParent[r.id];
+  }
+  Object.keys(byParent).forEach(pid => byParent[pid].forEach(k => opt(k, '— ')));
+  return html;
+}
 function accName(id) { const a = App.data.accounts.find(x => x.id === id); return a ? a.name : '—'; }
 
 function repeatText(p) {
@@ -380,6 +408,12 @@ function viewSettings() {
         <button class="btn soft" data-act="import">Загрузить</button>
       </div>
       <input type="file" id="importFile" accept=".json,application/json" style="display:none">
+      <div class="fab-row" style="margin:10px 0 0">
+        <button class="btn danger" data-act="wipe-local">Очистить базу</button>
+        <button class="btn danger" data-act="wipe-cloud">Очистить бэкап</button>
+      </div>
+      <div class="hint">«Очистить базу» удаляет счета, операции и категории на этом устройстве.
+        «Очистить бэкап» удаляет файл базы на Яндекс.Диске — на других устройствах данные останутся только локально.</div>
     </div>
 
     <div class="card">
@@ -436,6 +470,8 @@ function act(name) {
   else if (name === 'month-next') { App.month = shiftMonth(App.month, 1); render(); }
   else if (name === 'export') exportJSON();
   else if (name === 'import') $('#importFile').click();
+  else if (name === 'wipe-local') wipeLocal();
+  else if (name === 'wipe-cloud') wipeCloud();
   else if (name === 'yd-sync') yandexSync();
   else if (name === 'yd-doctor') ydDoctor();
   else if (name === 'yd-login') YA.login();
@@ -503,8 +539,7 @@ function editTransaction(id, kind) {
   const oldSplits = t ? txSplits(t) : null;
 
   const accOpts = sel => accs.map(a => `<option value="${a.id}" ${sel === a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('');
-  const cats = App.data.categories.filter(c => c.type === (isInc ? 'income' : 'expense'));
-  const catOpts = sel => cats.map(c => `<option value="${c.id}" ${sel === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+  const cats0 = App.data.categories.filter(c => c.type === (isInc ? 'income' : 'expense'));
 
   openSheet(`
     <h3>${t ? 'Операция' : isTr ? 'Перевод' : isInc ? 'Доход' : 'Расход'}</h3>
@@ -513,22 +548,39 @@ function editTransaction(id, kind) {
       <button data-k="inc" class="${isInc && !isTr ? 'on' : ''}">Доход</button>
       <button data-k="tr" class="${isTr ? 'on' : ''}">Перевод</button>
     </div>
-    <div class="field" style="margin-top:12px"><label>Сумма</label><input id="fAmount" inputmode="decimal" placeholder="0.00" value="${amountVal}"></div>
+    <div class="field" style="margin-top:12px">
+      <label>Сумма</label>
+      <div class="amrow">
+        <input id="fAmount" inputmode="decimal" placeholder="0.00" value="${amountVal}">
+        <button class="btn soft sm" id="fSplitOn" type="button" style="${isTr ? 'display:none' : ''}">Сплит</button>
+        <span class="leftval" id="fLeft" style="display:none"></span>
+      </div>
+    </div>
     <div class="field"><label>Дата</label><input id="fDate" type="date" value="${t ? t.date : D.today()}"></div>
     <div class="field" id="accWrap"><label>${isTr ? 'Со счёта' : 'Счёт'}</label><select id="fAcc">${accOpts(t ? t.accountId : accs[0].id)}</select></div>
     <div class="field" id="acc2Wrap" style="${isTr ? '' : 'display:none'}"><label>На счёт</label><select id="fAcc2">${accOpts(t && t.transferAccountId ? t.transferAccountId : (accs[1] || accs[0]).id)}</select></div>
-    <div class="field" id="catWrap" style="${isTr || oldSplits ? 'display:none' : ''}"><label>Категория</label><select id="fCat">${catOpts(t ? txCategoryId(t) : cats[0].id)}</select></div>
+    <div class="field" id="catWrap" style="${isTr || oldSplits ? 'display:none' : ''}">
+      <label>Категория</label>
+      <div class="catrow">
+        <select id="fCat">${catOptionsHtml(cats0, t ? txCategoryId(t) : (cats0[0] && cats0[0].id))}</select>
+        <button class="btn soft sm" id="catAddBtn" type="button">+</button>
+      </div>
+    </div>
     <div class="field" id="splitWrap" style="${oldSplits && !isTr ? '' : 'display:none'}">
       <label>Разбивка по категориям</label>
       <div id="splitRows"></div>
-      <div class="two" style="margin-top:8px">
-        <button class="btn soft sm" id="fSplitAdd" type="button">+ категория</button>
-        <button class="btn ghost sm" id="fSplitOff" type="button">убрать разбивку</button>
-      </div>
+      <button class="btn soft sm block" id="fSplitAdd" type="button" style="margin-top:8px">+ строка</button>
+      <button class="btn ghost sm block" id="fSplitOff" type="button" style="margin-top:6px">Убрать разбивку</button>
       <div class="hint" id="splitInfo"></div>
     </div>
-    <div class="field" id="splitOnWrap" style="${isTr || oldSplits ? 'display:none' : ''}">
-      <button class="btn ghost sm block" id="fSplitOn" type="button">Разделить по категориям</button>
+    <div class="field" id="catNew" style="display:none">
+      <label>Новая категория</label>
+      <input id="cnName" placeholder="Например, Кафе">
+      <div class="two" style="margin-top:8px">
+        <select id="cnParent"></select>
+        <button class="btn sm" id="cnAdd" type="button">Создать</button>
+      </div>
+      <div class="hint">Выбери родителя — получится подкатегория.</div>
     </div>
     <div class="field"><label>Контрагент / название</label><input id="fPayee" value="${esc(t ? (t.payee || '') : '')}" placeholder="Пятёрочка, зарплата…"></div>
     <div class="field"><label>Заметка</label><input id="fNote" value="${esc(t ? (t.note || '') : '')}"></div>
@@ -550,21 +602,59 @@ function editTransaction(id, kind) {
     </div>
   `, sheet => {
     const state = { kind: isTr ? 'tr' : isInc ? 'inc' : 'exp', split: !!oldSplits && !isTr,
-      photo: t ? (t.photo || null) : null, photoBlob: null, photoPending: !!(t && t.photoPending) };
+      photo: t ? (t.photo || null) : null, photoBlob: null, photoPending: !!(t && t.photoPending),
+      catTarget: null };
+
     const catList = () => App.data.categories.filter(c => c.type === (state.kind === 'inc' ? 'income' : 'expense'));
 
     const recalcSplit = () => {
-      const info = $('#splitInfo', sheet);
-      if (!info) return;
       const rows = $$('.srow', sheet);
-      if (!rows.length) { info.textContent = 'Добавь хотя бы две строки'; info.style.color = ''; return; }
       let sum = 0;
       rows.forEach(r => { sum += Math.abs(Money.toMinor($('.f-split-amt', r).value)); });
       const total = Math.abs(Money.toMinor($('#fAmount', sheet).value));
       const left = total - sum;
-      if (left === 0) { info.textContent = 'Распределено полностью'; info.style.color = 'var(--pos)'; }
-      else if (left > 0) { info.textContent = 'Осталось: ' + Money.fmt(left); info.style.color = 'var(--muted)'; }
-      else { info.textContent = 'Перебор: ' + Money.fmt(-left); info.style.color = 'var(--neg)'; }
+
+      const leftEl = $('#fLeft', sheet);
+      if (leftEl) {
+        if (state.split) {
+          leftEl.style.display = '';
+          leftEl.textContent = left === 0 ? 'распределено' : left > 0 ? 'осталось ' + Money.fmt(left) : 'перебор ' + Money.fmt(-left);
+          leftEl.className = 'leftval' + (left < 0 ? ' neg' : left === 0 ? ' pos' : '');
+        } else {
+          leftEl.style.display = 'none';
+        }
+      }
+
+      const info = $('#splitInfo', sheet);
+      if (info) {
+        if (!rows.length) info.textContent = 'Добавь хотя бы две строки';
+        else if (left > 0) info.textContent = 'Осталось распределить: ' + Money.fmt(left);
+        else if (left < 0) info.textContent = 'Перебор на ' + Money.fmt(-left) + ' — столько распределить нельзя';
+        else info.textContent = 'Распределено полностью';
+        info.style.color = left < 0 ? 'var(--neg)' : '';
+      }
+
+      rows.forEach(r => $('.f-split-amt', r).classList.toggle('over', left < 0));
+
+      const save = $('#fSave', sheet);
+      if (save) save.disabled = state.split && (left !== 0 || rows.length < 2);
+    };
+
+    const fillParents = () => {
+      const list = catList().filter(c => !c.parentId);
+      const sel = $('#cnParent', sheet);
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">— корневая —</option>' +
+        list.map(c => `<option value="${c.id}" ${c.id === cur ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+    };
+
+    const openCatNew = target => {
+      state.catTarget = target || null;
+      $('#catNew', sheet).style.display = '';
+      $('#cnName', sheet).value = '';
+      fillParents();
+      $('#cnName', sheet).focus();
+      $('#catNew', sheet).scrollIntoView({ block: 'nearest' });
     };
 
     const addSplitRow = (catId, val) => {
@@ -572,10 +662,12 @@ function editTransaction(id, kind) {
       const sel = catId || (list[0] ? list[0].id : '');
       const el = document.createElement('div');
       el.className = 'srow';
-      el.innerHTML = `<select class="f-split-cat">${list.map(c => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      el.innerHTML = `<select class="f-split-cat">${catOptionsHtml(list, sel)}</select>
         <input class="f-split-amt" inputmode="decimal" placeholder="0.00" value="${val || ''}">
-        <button class="btn danger sm" type="button">×</button>`;
-      $('button', el).onclick = () => {
+        <button class="btn soft sm" data-add type="button">+</button>
+        <button class="btn danger sm" data-del type="button">×</button>`;
+      $('[data-add]', el).onclick = () => openCatNew($('.f-split-cat', el));
+      $('[data-del]', el).onclick = () => {
         if ($$('.srow', sheet).length <= 2) { toast('Минимум две категории'); return; }
         el.remove(); recalcSplit();
       };
@@ -584,27 +676,61 @@ function editTransaction(id, kind) {
     };
 
     const setSplit = on => {
-      state.split = on;
-      $('#splitWrap', sheet).style.display = on ? '' : 'none';
-      $('#splitOnWrap', sheet).style.display = on ? 'none' : '';
-      $('#catWrap', sheet).style.display = (on || state.kind === 'tr') ? 'none' : '';
+      state.split = !!on && state.kind !== 'tr';
+      $('#splitWrap', sheet).style.display = state.split ? '' : 'none';
+      $('#catWrap', sheet).style.display = (state.split || state.kind === 'tr') ? 'none' : '';
+      const btn = $('#fSplitOn', sheet);
+      btn.classList.toggle('btn', state.split);
+      btn.classList.toggle('soft', !state.split);
+      btn.textContent = state.split ? 'Сплит ✓' : 'Сплит';
       $('#splitRows', sheet).innerHTML = '';
-      if (!on) return;
+      if (!state.split) { $('#catNew', sheet).style.display = 'none'; recalcSplit(); return; }
       if (oldSplits && oldSplits.length) {
         oldSplits.forEach(s => addSplitRow(s.categoryId, (Math.abs(s.amount) / 100).toFixed(2)));
       } else {
-        const total = Math.abs(Money.toMinor($('#fAmount', sheet).value));
-        addSplitRow($('#fCat', sheet).value, total ? (total / 100).toFixed(2) : '');
+        addSplitRow($('#fCat', sheet).value, '');
         addSplitRow('', '');
       }
       recalcSplit();
     };
 
     if (oldSplits && !isTr) setSplit(true);
-    $('#fSplitOn', sheet).onclick = () => setSplit(true);
+    $('#fSplitOn', sheet).onclick = () => setSplit(!state.split);
     $('#fSplitOff', sheet).onclick = () => setSplit(false);
     $('#fSplitAdd', sheet).onclick = () => { addSplitRow('', ''); recalcSplit(); };
-    $('#fAmount', sheet).addEventListener('input', () => { if (state.split) recalcSplit(); });
+    $('#fAmount', sheet).addEventListener('input', () => { recalcSplit(); });
+
+    const refreshCats = () => {
+      const list = catList();
+      const main = $('#fCat', sheet);
+      if (main) main.innerHTML = catOptionsHtml(list, main.value);
+      $$('.srow', sheet).forEach(r => {
+        const sel = $('.f-split-cat', r);
+        const cur = sel.value;
+        sel.innerHTML = catOptionsHtml(list, cur);
+      });
+      const np = $('#cnParent', sheet);
+      if (np && $('#catNew', sheet).style.display !== 'none') fillParents();
+    };
+
+    $('#catAddBtn', sheet).onclick = () => openCatNew($('#fCat', sheet));
+    $('#cnAdd', sheet).onclick = () => {
+      const name = $('#cnName', sheet).value.trim();
+      if (!name) { toast('Введите название'); return; }
+      const parentId = $('#cnParent', sheet).value || null;
+      const cat = {
+        id: 'cat' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+        name, type: state.kind === 'inc' ? 'income' : 'expense',
+        parentId, updatedAt: Date.now()
+      };
+      App.data.categories.push(cat);
+      saveData();
+      refreshCats();
+      if (state.catTarget && state.catTarget.isConnected) state.catTarget.value = cat.id;
+      $('#catNew', sheet).style.display = 'none';
+      recalcSplit();
+      toast('Категория «' + name + '» создана');
+    };
 
     const paintPhoto = async () => {
       const box = $('#photoBox', sheet);
@@ -647,29 +773,18 @@ function editTransaction(id, kind) {
     };
     paintPhoto();
 
-    const refreshCats = () => {
-      const list = catList();
-      $('#fCat', sheet).innerHTML = list.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
-      $$('.srow', sheet).forEach(r => {
-        const sel = $('.f-split-cat', r);
-        const cur = sel.value;
-        sel.innerHTML = list.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
-        if (list.some(c => c.id === cur)) sel.value = cur;
-      });
-    };
     const applyKind = k => {
       state.kind = k;
       $$('#segKind button', sheet).forEach(b => b.classList.toggle('on', b.dataset.k === k));
       $('#acc2Wrap', sheet).style.display = k === 'tr' ? '' : 'none';
+      $('#fSplitOn', sheet).style.display = k === 'tr' ? 'none' : '';
       if (k === 'tr') {
-        $('#splitWrap', sheet).style.display = 'none';
-        $('#splitOnWrap', sheet).style.display = 'none';
+        setSplit(false);
         $('#catWrap', sheet).style.display = 'none';
       } else {
         $('#catWrap', sheet).style.display = state.split ? 'none' : '';
-        $('#splitOnWrap', sheet).style.display = state.split ? 'none' : '';
         refreshCats();
-        if (state.split) recalcSplit();
+        recalcSplit();
       }
     };
     $$('#segKind button', sheet).forEach(b => b.onclick = () => applyKind(b.dataset.k));
@@ -701,7 +816,8 @@ function editTransaction(id, kind) {
           })).filter(p => p.amount > 0);
           if (parts.length < 2) { toast('Нужно минимум две категории с суммой'); return; }
           const sum = parts.reduce((s, p) => s + p.amount, 0);
-          if (sum !== amt) { toast('Сумма частей ' + Money.fmt(sum) + ' ≠ ' + Money.fmt(amt)); return; }
+          if (sum > amt) { toast('Сумма частей больше операции на ' + Money.fmt(sum - amt)); return; }
+          if (sum !== amt) { toast('Осталось распределить ' + Money.fmt(amt - sum)); return; }
           splits = parts.map(p => ({ categoryId: p.categoryId, amount: sign * p.amount }));
         }
         const amount = sign * amt;
@@ -835,8 +951,40 @@ function manualYandexToken() {
   });
 }
 
-function exportJSON() {
-  const blob = new Blob([JSON.stringify(App.data, null, 2)], { type: 'application/json' });
+/* ---------- очистка ---------- */
+async function wipeLocal() {
+  if (!confirm('Очистить базу на этом устройстве? Счета, операции, категории и фото будут удалены.')) return;
+  if (!confirm('Точно удалить? Отменить не получится. Бэкап лучше сначала скачать.')) return;
+  const keep = App.data.settings;
+  App.data = emptyData();
+  App.data.settings = keep || {};
+  try {
+    const db = await PhotoStore.open();
+    await new Promise(res => {
+      const tx = db.transaction('blobs', 'readwrite');
+      tx.objectStore('blobs').clear();
+      tx.oncomplete = res; tx.onerror = res; tx.onabort = res;
+    });
+  } catch (e) { /* кэш фото не критичен */ }
+  saveData(); render(); toast('База очищена');
+}
+
+async function wipeCloud() {
+  const token = ((App.data.settings.yd || {}).token || '').trim();
+  if (!token) { toast('Сначала подключи Яндекс.Диск'); return; }
+  if (!confirm('Удалить файл базы на Яндекс.Диске (app:/Cash/cash-data.json)?\n\nНа других устройствах данные останутся только локально.')) return;
+  try {
+    const r = await ydReq(YD.api + '/resources?path=' + encodeURIComponent(YD.file), token, { method: 'DELETE' });
+    if (!r.ok && r.status !== 404) throw httpErr('удаление', r);
+    App.syncStatus = 'Бэкап на Диске удалён: ' + new Date().toLocaleTimeString('ru-RU');
+    render();
+    toast('Бэкап удалён');
+  } catch (e) {
+    toast('Не удалось: ' + ((e && e.message) || e));
+  }
+}
+
+function exportJSON() {  const blob = new Blob([JSON.stringify(App.data, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'cash-backup-' + D.today() + '.json';
