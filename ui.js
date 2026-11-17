@@ -9,7 +9,7 @@ const App = {
 };
 
 const STORE_KEY = 'cash.data.v1';
-const APP_VERSION = '0.9';
+const APP_VERSION = '1.0';
 
 /* ---------- хранилище ---------- */
 function loadData() {
@@ -430,6 +430,10 @@ function viewSettings() {
       </div>
       <input type="file" id="importFile" accept=".json,application/json" style="display:none">
       <div class="fab-row" style="margin:10px 0 0">
+        <button class="btn ghost block" data-act="stmt">Загрузить выписку банка (PDF)</button>
+      </div>
+      <input type="file" id="stmtFile" accept=".pdf,application/pdf" style="display:none">
+      <div class="fab-row" style="margin:10px 0 0">
         <button class="btn danger" data-act="wipe-local">Очистить базу</button>
         <button class="btn danger" data-act="wipe-cloud">Очистить бэкап</button>
       </div>
@@ -493,6 +497,7 @@ function act(name) {
   else if (name === 'month-next') { App.month = shiftMonth(App.month, 1); render(); }
   else if (name === 'export') exportJSON();
   else if (name === 'import') $('#importFile').click();
+  else if (name === 'stmt') $('#stmtFile').click();
   else if (name === 'wipe-local') wipeLocal();
   else if (name === 'wipe-cloud') wipeCloud();
   else if (name === 'yd-sync') yandexSync();
@@ -1010,6 +1015,176 @@ async function wipeCloud() {
   }
 }
 
+/* ---------- импорт выписки банка (PDF) ---------- */
+let pdfjsReady = null;
+function ensurePdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (pdfjsReady) return pdfjsReady;
+  const V = '3.11.174';
+  const base = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/' + V + '/';
+  pdfjsReady = new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = base + 'pdf.min.js';
+    s.onload = () => {
+      try { window.pdfjsLib.GlobalWorkerOptions.workerSrc = base + 'pdf.worker.min.js'; } catch (e) {}
+      res(window.pdfjsLib);
+    };
+    s.onerror = () => { pdfjsReady = null; rej(new Error('не удалось загрузить pdf.js — нужен интернет')); };
+    document.head.appendChild(s);
+  });
+  return pdfjsReady;
+}
+
+/* собираем строки из текстовых блоков PDF: группируем по Y, сортируем по X */
+async function pdfToLines(buf) {
+  const lib = await ensurePdfJs();
+  const doc = await lib.getDocument({ data: new Uint8Array(buf) }).promise;
+  const lines = [];
+  for (let p = 1; p <= doc.numPages; p++) {
+    const page = await doc.getPage(p);
+    const tc = await page.getTextContent();
+    const rows = [];
+    for (const it of tc.items) {
+      if (!it.str || !it.str.trim()) continue;
+      const y = it.transform[5], x = it.transform[4];
+      let row = null;
+      for (const r of rows) { if (Math.abs(r.y - y) <= 2.5) { row = r; break; } }
+      if (!row) { row = { y, items: [] }; rows.push(row); }
+      row.items.push({ x, s: it.str });
+    }
+    rows.sort((a, b) => b.y - a.y);
+    for (const r of rows) {
+      r.items.sort((a, b) => a.x - b.x);
+      lines.push(r.items.map(i => i.s).join(' '));
+    }
+  }
+  return lines;
+}
+
+/* разбор «Справки о движении средств» Т-Банка */
+function parseTbankStatement(lines) {
+  const RE = /^\s*(\d{2}\.\d{2}\.\d{4})\s+(\d{2}\.\d{2}\.\d{4})\s+([-+]?[\d\s]*\d[.,]\d{2})\s*₽\s+([-+]?[\d\s]*\d[.,]\d{2})\s*₽\s*(.*)$/;
+  const toIso = d => { const [dd, mm, yy] = d.split('.'); return yy + '-' + mm + '-' + dd; };
+  const out = [];
+  let cur = null, ended = false;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/^(Пополнения|Расходы):/.test(line) || /^С уважением/.test(line)) { ended = true; continue; }
+    if (ended) continue;
+    if (/^Дата и время/.test(line) || /^операции\s/.test(line)) continue;
+    if (/^АО «ТБанк»/.test(line) || /универсальная лицензия/.test(line) || /^БИК /.test(line)) continue;
+    if (/^\d+$/.test(line)) continue;
+    const m = line.match(RE);
+    if (m) {
+      if (cur) out.push(cur);
+      let rest = (m[5] || '').trim();
+      let card = '';
+      const cm = rest.match(/(?:^|\s)(\d{4})$/);
+      if (cm) { card = cm[1]; rest = rest.slice(0, cm.index).trim(); }
+      cur = { raw: rest, card, extra: [], date: toIso(m[1]), amount: Money.toMinor(m[4]) };
+      continue;
+    }
+    if (cur) {
+      if (/^\d{2}:\d{2}(\s+\d{2}:\d{2})?\s*$/.test(line)) continue;
+      let clean = line.replace(/^\d{2}:\d{2}\s+\d{2}:\d{2}\s*/, '').replace(/^\d{2}:\d{2}\s*/, '').trim();
+      clean = clean.replace(/^\d{5}\s+/, '');
+      if (clean) cur.extra.push(clean);
+    }
+  }
+  if (cur) out.push(cur);
+  for (const t of out) {
+    const extra = t.extra.filter(x => !/^\d{4}$/.test(x));
+    t.desc = (t.raw + ' ' + extra.join(' ')).replace(/—/g, '-').replace(/\s+/g, ' ').trim();
+    delete t.raw; delete t.extra;
+  }
+  return out.filter(t => t.amount && t.date);
+}
+
+const STMT_RULES = [
+  [/ПЯТЕРОЧКА|PYATEROCHKA|МАГНИТ|MAGNIT|ПЕРЕКРЕСТОК|PEREKRESTOK|ЛЕНТА|LENTA|ДИКСИ|DIKSI|ВКУСВИЛЛ|VKUSVILL|АШАН|ASHAN|САМОКАТ|SAMOKAT|АВОСЬКА|AVOSKA|ПРОДУКТ|SUPERMARKET|MARKET/i, 'Продукты'],
+  [/АЗС|AZS|ЛУКОЙЛ|LUKOIL|ГАЗПРОМНЕФТЬ|GAZPROMNEFT|РОСНЕФТЬ|ROSNEFT|ТАТНЕФТЬ|TATNEFT|ЗАПРАВК|ТОПЛИВО|ШЕЛЛ|SHELL/i, 'Транспорт'],
+  [/АПТЕК|APTEKA|КЛИНИК|KLINIK|СТОМАТОЛОГ|STOMATOLOG|МЕДИЦИН|MEDIC|ЛАБОРАТОР|LABORATOR/i, 'Здоровье'],
+  [/КИНО|KINO|ТЕАТР|TEATR|РЕСТОРАН|RESTORAN|КАФЕ|CAFE|COFFEE|ПИЦЦ|PIZZA|СУШИ|SUSHI|ДОСТАВКА|DOSTAVKA|ЯНДЕКС ЕДА|YANDEX EDA/i, 'Развлечения'],
+  [/ЖКХ|ZHKKH|КВАРТПЛАТ|ЭНЕРГОСБЫТ|ВОДОКАНАЛ|МЕЖРЕГИОНГАЗ|ИНТЕРНЕТ|INTERNET|МТС|MTS|МЕГАФОН|MEGAFON|БИЛАЙН|BEELINE|ТЕЛЕ2|TELE2|СВЯЗЬ/i, 'Дом'],
+  [/КРЕДИТ|KREDIT|ИПОТЕК|IPOTEK|ПОГАШЕНИ|POGASHEN/i, 'Кредиты'],
+  [/ВНУТРЕННИЙ ПЕРЕВОД|ВНЕШНИЙ ПЕРЕВОД|ПЕРЕВОД С КАРТЫ|ПЕРЕВОД НА|PEREVOD/i, 'Переводы']
+];
+const STMT_INC_RULES = [
+  [/КЭШБЭК/i, 'Кэшбэк'],
+  [/ЗАРПЛАТ|АВАНС|ПРЕМИЯ/i, 'Зарплата'],
+  [/ПРОЦЕНТ/i, 'Проценты']
+];
+
+function stmtCatId(desc, amount) {
+  const type = amount > 0 ? 'income' : 'expense';
+  const rules = amount > 0 ? STMT_INC_RULES : STMT_RULES;
+  let name = null;
+  for (const [re, nm] of rules) { if (re.test(desc)) { name = nm; break; } }
+  if (!name) name = amount > 0 ? 'Прочий доход' : 'Прочее';
+  let c = App.data.categories.find(x => x.name.toLowerCase() === name.toLowerCase() && x.type === type);
+  if (!c) {
+    c = { id: 'cat' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name, type, parentId: null, updatedAt: Date.now() };
+    App.data.categories.push(c);
+  }
+  return c.id;
+}
+
+async function importStatementFile(file) {
+  if (!file) return;
+  toast('Читаю выписку…');
+  let txs;
+  try {
+    const buf = await file.arrayBuffer();
+    const lines = await pdfToLines(buf);
+    txs = parseTbankStatement(lines);
+  } catch (e) {
+    toast('Не удалось прочитать PDF: ' + ((e && e.message) || e));
+    return;
+  }
+  if (!txs.length) { toast('В файле не нашлось операций'); return; }
+  const accs = App.data.accounts.filter(a => !a.closed);
+  if (!accs.length) { toast('Сначала добавь счёт'); return; }
+
+  const dates = txs.map(t => t.date).sort();
+  const inc = txs.filter(t => t.amount > 0).reduce((s, t) => s + t.amount, 0);
+  const exp = txs.filter(t => t.amount < 0).reduce((s, t) => s + t.amount, 0);
+  const accOpts = accs.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+
+  openSheet(`
+    <h3>Выписка из банка</h3>
+    <div class="stats" style="margin-bottom:12px">
+      <div class="stat"><div class="k">Операций</div><div class="v">${txs.length}</div></div>
+      <div class="stat"><div class="k">Период</div><div class="v" style="font-size:14px">${D.ru(dates[0])} – ${D.ru(dates[dates.length - 1])}</div></div>
+      <div class="stat"><div class="k">Приход</div><div class="v pos">${Money.fmt(inc)}</div></div>
+      <div class="stat"><div class="k">Расход</div><div class="v neg">${Money.fmt(exp)}</div></div>
+    </div>
+    <div class="field"><label>Зачислить на счёт</label><select id="stAcc">${accOpts}</select></div>
+    <div class="actions"><button class="btn" id="stGo">Импортировать</button></div>
+    <div class="hint">Операции, которые уже есть в базе (та же дата, сумма и описание), пропускаются.
+      Категории подставляются по описанию.</div>
+  `, sheet => {
+    $('#stGo', sheet).onclick = () => {
+      const accId = $('#stAcc', sheet).value;
+      const seen = new Set(App.data.transactions.map(t => t.date + '|' + t.amount + '|' + (t.note || '').slice(0, 40).toLowerCase()));
+      const now = Date.now();
+      let added = 0, dup = 0;
+      for (const t of txs) {
+        const key = t.date + '|' + t.amount + '|' + t.desc.slice(0, 40).toLowerCase();
+        if (seen.has(key)) { dup++; continue; }
+        /* в seen не добавляем: одинаковые операции внутри одной выписки должны импортироваться все */
+        App.data.transactions.push({
+          id: uid(), accountId: accId, date: t.date, amount: t.amount,
+          categoryId: stmtCatId(t.desc, t.amount), payee: '', note: t.desc, updatedAt: now
+        });
+        added++;
+      }
+      saveData(); closeSheet(); render();
+      toast('Импортировано ' + added + (dup ? ', пропущено дублей: ' + dup : ''));
+    };
+  });
+}
+
 function exportJSON() {  const blob = new Blob([JSON.stringify(App.data, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -1048,6 +1223,7 @@ function init() {
   $$('#tabs button').forEach(b => b.onclick = () => { App.tab = b.dataset.tab; location.hash = b.dataset.tab; render(); });
   document.addEventListener('change', e => {
     if (e.target.id === 'importFile' && e.target.files[0]) importJSONFile(e.target.files[0]);
+    if (e.target.id === 'stmtFile' && e.target.files[0]) importStatementFile(e.target.files[0]);
     if (e.target.id === 'ydToken') { App.data.settings.yd = { token: e.target.value.trim() }; saveData(); }
     if (e.target.id === 'tgToken') { App.data.settings.tg = Object.assign({}, App.data.settings.tg, { token: e.target.value.trim() }); saveData(); }
     if (e.target.id === 'tgChat') { App.data.settings.tg = Object.assign({}, App.data.settings.tg, { chatId: e.target.value.trim() }); saveData(); }
