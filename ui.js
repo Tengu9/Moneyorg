@@ -504,10 +504,12 @@ function editTransaction(id, kind) {
       <label>Фото чека</label>
       <div id="photoBox"></div>
       <input type="file" id="photoFile" accept="image/*" style="display:none">
+      <input type="file" id="photoCam" accept="image/*" capture="environment" style="display:none">
       <div class="two" style="margin-top:8px">
-        <button class="btn soft sm" id="photoAdd" type="button">Добавить фото</button>
-        <button class="btn ghost sm" id="photoDel" type="button">Убрать фото</button>
+        <button class="btn soft sm" id="photoAdd" type="button">Снять фото</button>
+        <button class="btn soft sm" id="photoGal" type="button">Из галереи</button>
       </div>
+      <button class="btn ghost sm block" id="photoDel" type="button" style="margin-top:8px">Убрать фото</button>
       <div class="hint" id="photoHint"></div>
     </div>
     <div class="actions">
@@ -590,9 +592,11 @@ function editTransaction(id, kind) {
       hint.textContent = state.photoPending ? 'Снято без сети — уедет на Диск при синхронизации.' : '';
     };
 
-    $('#photoAdd', sheet).onclick = () => $('#photoFile', sheet).click();
-    $('#photoFile', sheet).onchange = async e => {
+    $('#photoAdd', sheet).onclick = () => $('#photoCam', sheet).click();
+    $('#photoGal', sheet).onclick = () => $('#photoFile', sheet).click();
+    const onPhotoChosen = async e => {
       const f = e.target.files && e.target.files[0];
+      e.target.value = '';
       if (!f) return;
       $('#photoHint', sheet).textContent = 'Сжимаю…';
       try {
@@ -603,6 +607,8 @@ function editTransaction(id, kind) {
         paintPhoto();
       } catch (err) { $('#photoHint', sheet).textContent = 'Не удалось обработать фото'; }
     };
+    $('#photoCam', sheet).onchange = onPhotoChosen;
+    $('#photoFile', sheet).onchange = onPhotoChosen;
     $('#photoDel', sheet).onclick = () => {
       state.photo = null; state.photoBlob = null; state.photoPending = false; paintPhoto();
     };
