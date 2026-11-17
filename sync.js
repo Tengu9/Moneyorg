@@ -107,21 +107,38 @@ function xhrGet(url, token, as) {
   });
 }
 
+/* у ссылки на скачивание бывает недоступен хост downloader.disk.yandex.ru
+   (блокировки, DNS, защита браузера). Подпись к хосту не привязана —
+   та же ссылка работает с .net и .com. */
+function ydHrefVariants(href) {
+  const s = String(href);
+  const list = [s];
+  const m = s.match(/^https:\/\/([^/]+)(\/.*)$/);
+  if (m && m[1] === 'downloader.disk.yandex.ru') {
+    list.push('https://downloader.disk.yandex.net' + m[2]);
+    list.push('https://downloader.disk.yandex.com' + m[2]);
+  }
+  return list;
+}
+
 async function ydGetHref(href, token, as) {
-  let lastErr = null;
-  const attempts = [
-    () => fetch(href),
-    () => fetch(href, { headers: { Authorization: 'OAuth ' + token } })
-  ];
-  for (const a of attempts) {
-    try {
-      const r = await a();
-      if (!r.ok) throw httpErr('скачивание', r);
-      return as === 'blob' ? await r.blob() : await r.text();
-    } catch (e) { lastErr = e; }
+  const errors = [];
+  for (const url of ydHrefVariants(href)) {
+    const host = (String(url).match(/^https:\/\/([^/:]+)/) || [])[1] || '?';
+    for (const withAuth of [false, true]) {
+      try {
+        const opts = withAuth ? { headers: { Authorization: 'OAuth ' + token } } : undefined;
+        const r = await fetch(url, opts);
+        if (!r.ok) throw httpErr('скачивание', r);
+        return as === 'blob' ? await r.blob() : await r.text();
+      } catch (e) {
+        errors.push(host + (withAuth ? ' + токен' : '') + ': ' + e.message);
+      }
+    }
   }
   try { return await xhrGet(href, token, as); }
-  catch (e) { throw lastErr || e; }
+  catch (e) { errors.push('XHR: ' + e.message); }
+  throw new Error(errors.join(' · '));
 }
 
 async function ydUpload(token, text) {
@@ -203,14 +220,8 @@ async function ydDoctor() {
     const j = await r.json();
     if (!j.href) throw new Error('в ответе API нет ссылки');
     const host = (String(j.href).match(/^https:\/\/([^/:]+)/) || [])[1] || '?';
-    const res = [];
-    try { const f = await fetch(j.href); res.push('обычный: ' + f.status + (f.ok ? ' ✔' : ' ✘')); }
-    catch (e) { res.push('обычный: ✘ ' + e.message); }
-    try { const f = await fetch(j.href, { headers: { Authorization: 'OAuth ' + token } }); res.push('с токеном: ' + f.status + (f.ok ? ' ✔' : ' ✘')); }
-    catch (e) { res.push('с токеном: ✘ ' + e.message); }
-    try { const t = await xhrGet(j.href, token, 'text'); res.push('XHR: ✔ ' + t.length + ' симв.'); }
-    catch (e) { res.push('XHR: ✘ ' + e.message); }
-    return 'хост ' + host + ' · ' + res.join(' · ');
+    const text = await ydGetHref(j.href, token, 'text');
+    return 'хост ' + host + ' · прочитано ' + text.length + ' симв.';
   });
   const probe = async (label, contentType) => {
     await step(label, async () => {

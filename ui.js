@@ -9,7 +9,7 @@ const App = {
 };
 
 const STORE_KEY = 'cash.data.v1';
-const APP_VERSION = '0.5';
+const APP_VERSION = '0.6';
 
 /* ---------- хранилище ---------- */
 function loadData() {
