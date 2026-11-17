@@ -94,7 +94,9 @@ function accountBalance(data, accId, uptoDate) {
 }
 
 function totalBalance(data, uptoDate) {
-  return data.accounts.filter(a => !a.closed).reduce((s, a) => s + accountBalance(data, a.id, uptoDate), 0);
+  return data.accounts
+    .filter(a => !a.closed && !a.noTotal)
+    .reduce((s, a) => s + accountBalance(data, a.id, uptoDate), 0);
 }
 
 /* ---------- разбивка операции по категориям ---------- */

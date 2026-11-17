@@ -9,7 +9,7 @@ const App = {
 };
 
 const STORE_KEY = 'cash.data.v1';
-const APP_VERSION = '0.8';
+const APP_VERSION = '0.9';
 
 /* ---------- хранилище ---------- */
 function loadData() {
@@ -233,12 +233,19 @@ function render() {
 
 function viewAccounts() {
   const accs = App.data.accounts.filter(a => !a.closed).sort((a, b) => (a.sort || 0) - (b.sort || 0));
-  let rows = accs.map(a => {
+  let rows = accs.map((a, i) => {
     const bal = accountBalance(App.data, a.id);
     return `<div class="row" data-edit-acc="${a.id}">
       <div class="ico">${ICON_SVG[a.type] || ICON_SVG.cash}</div>
-      <div class="grow"><div class="title">${esc(a.name)}</div><div class="sub">${accTypeName(a.type)}</div></div>
+      <div class="grow">
+        <div class="title">${esc(a.name)}${a.noTotal ? ' <span class="pill">не в итоге</span>' : ''}</div>
+        <div class="sub">${accTypeName(a.type)}</div>
+      </div>
       <div class="amount ${bal < 0 ? 'neg' : ''}">${Money.fmt(bal)}</div>
+      <div class="move">
+        <button class="btn soft sm" data-up="${a.id}" ${i === 0 ? 'disabled' : ''} aria-label="выше">↑</button>
+        <button class="btn soft sm" data-down="${a.id}" ${i === accs.length - 1 ? 'disabled' : ''} aria-label="ниже">↓</button>
+      </div>
     </div>`;
   }).join('');
   if (!accs.length) rows = '<div class="empty">Пока нет счетов.<br>Добавь первый — наличные, карту или вклад.</div>';
@@ -247,7 +254,21 @@ function viewAccounts() {
     <div class="fab-row">
       <button class="btn block" data-act="add-acc">+ Добавить счёт</button>
     </div>
-    <div class="hint">Нажми на счёт, чтобы изменить или удалить. Итог по всем счетам — в шапке.</div>`;
+    <div class="hint">Нажми на счёт, чтобы изменить или удалить; стрелками ↑↓ меняется порядок.
+      В свойствах счёта можно исключить его из общего баланса.</div>`;
+}
+
+/* сдвиг счёта вверх/вниз с перенумерацией */
+function moveAccount(id, dir) {
+  const list = App.data.accounts.filter(a => !a.closed).sort((a, b) => (a.sort || 0) - (b.sort || 0));
+  const i = list.findIndex(a => a.id === id);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= list.length) return;
+  const [moved] = list.splice(i, 1);
+  list.splice(j, 0, moved);
+  const now = Date.now();
+  list.forEach((a, idx) => { a.sort = idx; a.updatedAt = now; });
+  saveData(); render();
 }
 
 function viewTransactions() {
@@ -455,6 +476,8 @@ function bindView() {
   const view = $('#view');
   $$('[data-act]', view).forEach(b => b.onclick = () => act(b.dataset.act));
   $$('[data-edit-acc]', view).forEach(r => r.onclick = () => editAccount(r.dataset.editAcc));
+  $$('[data-up]', view).forEach(b => b.onclick = e => { e.stopPropagation(); moveAccount(b.dataset.up, -1); });
+  $$('[data-down]', view).forEach(b => b.onclick = e => { e.stopPropagation(); moveAccount(b.dataset.down, 1); });
   $$('[data-edit-tx]', view).forEach(r => r.onclick = () => editTransaction(r.dataset.editTx));
   $$('[data-edit-plan]', view).forEach(r => r.onclick = () => editPlan(r.dataset.editPlan));
   $$('[data-h]', view).forEach(b => b.onclick = () => { App.horizon = +b.dataset.h; render(); });
@@ -505,6 +528,8 @@ function editAccount(id) {
       </div>
       <div class="field"><label>Начальный остаток</label><input id="fOpen" inputmode="decimal" value="${a ? (a.opening / 100).toFixed(2) : '0.00'}"></div>
     </div>
+    <label class="check"><input type="checkbox" id="fNoTotal" ${a && a.noTotal ? 'checked' : ''}>
+      <span>Не учитывать в общем балансе</span></label>
     <div class="actions">
       <button class="btn" id="fSave">Сохранить</button>
       ${a ? '<button class="btn danger" id="fDel">Удалить</button>' : ''}
@@ -514,8 +539,9 @@ function editAccount(id) {
       const name = $('#fName', sheet).value.trim() || 'Счёт';
       const type = $('#fType', sheet).value;
       const opening = Money.toMinor($('#fOpen', sheet).value);
-      if (a) { Object.assign(a, { name, type, opening, updatedAt: Date.now() }); }
-      else App.data.accounts.push({ id: uid(), name, type, opening, sort: App.data.accounts.length, closed: false, updatedAt: Date.now() });
+      const noTotal = $('#fNoTotal', sheet).checked;
+      if (a) { Object.assign(a, { name, type, opening, noTotal, updatedAt: Date.now() }); }
+      else App.data.accounts.push({ id: uid(), name, type, opening, noTotal, sort: App.data.accounts.length, closed: false, updatedAt: Date.now() });
       saveData(); closeSheet(); render();
     };
     if (a) $('#fDel', sheet).onclick = () => {
